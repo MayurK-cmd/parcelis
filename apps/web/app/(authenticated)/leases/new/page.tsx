@@ -1392,6 +1392,224 @@ function LeaseTermsSelector({
   );
 }
 
+function LeaseReviewPropertyAndUnit({
+  allowPartialPayments,
+  billingResponsibility,
+  endsOn,
+  monthlyRentCents,
+  onEdit,
+  propertyId,
+  rentDueDay,
+  securityDepositCents,
+  startsOn,
+  tenantIds,
+  tenantAllocations,
+  termType,
+  unitId,
+}: {
+  allowPartialPayments: boolean;
+  billingResponsibility: LeaseDraft["billingResponsibility"];
+  endsOn: string;
+  monthlyRentCents: number | null;
+  onEdit: (stepId: "property" | "residents" | "terms") => void;
+  propertyId: number | null;
+  rentDueDay: number;
+  securityDepositCents: number | null;
+  startsOn: string;
+  tenantIds: number[];
+  tenantAllocations: LeaseDraft["tenantAllocations"];
+  termType: LeaseDraft["termType"];
+  unitId: number | null;
+}) {
+  const propertiesQuery = useQuery({
+    queryKey: queryKeys.properties.list,
+    queryFn: () => apiClient.properties.list.query(),
+  });
+  const tenantsQuery = useQuery({
+    queryKey: queryKeys.tenants.list,
+    queryFn: () => apiClient.tenants.list.query(),
+  });
+  const property = propertiesQuery.data?.find((item) => item.id === propertyId);
+  const unit = property?.units.find((item) => item.id === unitId);
+  const residents = tenantIds
+    .map((tenantId) => tenantsQuery.data?.find((tenant) => tenant.id === tenantId))
+    .filter((tenant): tenant is NonNullable<typeof tenant> => Boolean(tenant));
+  const allocationsByTenantId = new Map(tenantAllocations.map((allocation) => [allocation.tenantId, allocation]));
+
+  if (propertiesQuery.isLoading || tenantsQuery.isLoading) return <LoadingState label="Loading lease details" />;
+
+  if (propertiesQuery.error || tenantsQuery.error) {
+    return (
+      <div className="w-full p-5 md:p-6">
+        <Alert variant="destructive">
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <AlertTitle>Unable to load lease review details</AlertTitle>
+          <AlertDescription>Return to the previous step and try again.</AlertDescription>
+        </Alert>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex w-full flex-1 flex-col gap-6 p-5 md:p-6">
+      <div>
+        <h2 className="text-xl font-bold text-parcelis-charcoal dark:text-white">Review lease</h2>
+        <p className="mt-1 text-sm text-parcelis-gray dark:text-white/65">Confirm the selected property and unit.</p>
+      </div>
+      <section className="rounded-lg border border-parcelis-border dark:bg-parcelis-slate">
+        <ReviewSectionHeader onEdit={() => onEdit("property")} title="Property and unit" />
+        <div className="flex flex-col gap-4 p-4 md:flex-row">
+          <div className="flex flex-1 items-center gap-3 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
+            <Building2 className="h-5 w-5 text-parcelis-green" />
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
+                Property
+              </p>
+              <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">
+                {property?.name ?? "Not selected"}
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-1 items-center gap-3 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
+            <DoorOpen className="h-5 w-5 text-parcelis-green" />
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">Unit</p>
+              <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">
+                {unit?.name ?? "Not selected"}
+              </p>
+            </div>
+          </div>
+        </div>
+      </section>
+      <section className="rounded-lg border border-parcelis-border dark:bg-parcelis-slate">
+        <ReviewSectionHeader onEdit={() => onEdit("residents")} title="Residents and responsibility" />
+        <div className="flex flex-col gap-4 p-4 md:flex-row">
+          <div className="flex flex-1 flex-col gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
+              Residents
+            </p>
+            {residents.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {residents.map((resident) => (
+                  <span
+                    className="rounded-md bg-parcelis-porcelain/60 px-3 py-2 text-sm font-semibold text-parcelis-charcoal dark:bg-parcelis-charcoal/55 dark:text-white"
+                    key={resident.id}
+                  >
+                    {resident.firstName} {resident.lastName}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm font-medium text-parcelis-charcoal dark:text-white">No residents selected</p>
+            )}
+          </div>
+          <div className="flex flex-1 flex-col gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
+              Billing responsibility
+            </p>
+            <p className="font-semibold text-parcelis-charcoal dark:text-white">
+              {billingResponsibility === "joint" ? "Joint responsibility" : "Individual responsibility"}
+            </p>
+            <p className="text-sm leading-6 text-parcelis-gray dark:text-white/65">
+              {billingResponsibility === "joint"
+                ? "All residents are responsible for the full lease amount."
+                : "Each resident is responsible for their assigned rent and deposit share."}
+            </p>
+          </div>
+        </div>
+      </section>
+      <section className="rounded-lg border border-parcelis-border dark:bg-parcelis-slate">
+        <ReviewSectionHeader onEdit={() => onEdit("terms")} title="Lease terms" />
+        <div className="flex flex-wrap gap-4 p-4">
+          <ReviewDetail label="Lease type" value={termType === "fixed" ? "Fixed term" : "Month-to-month"} />
+          <ReviewDetail label="Start date" value={formatDateLabel(parseDateInput(startsOn) ?? new Date(startsOn))} />
+          <ReviewDetail
+            label="End date"
+            value={
+              termType === "month_to_month"
+                ? "Month-to-month"
+                : formatDateLabel(parseDateInput(endsOn) ?? new Date(endsOn))
+            }
+          />
+          <ReviewDetail
+            label="Monthly rent"
+            value={monthlyRentCents === null ? "Not set" : `${formatCurrency(monthlyRentCents)}/month`}
+          />
+          <ReviewDetail label="Rent due" value={`${formatDayOfMonth(rentDueDay)} of each month`} />
+        </div>
+      </section>
+      <section className="rounded-lg border border-parcelis-border dark:bg-parcelis-slate">
+        <ReviewSectionHeader onEdit={() => onEdit("residents")} title="Deposit" />
+        <div className="flex flex-col gap-4 p-4 md:flex-row">
+          <ReviewDetail
+            label="Security deposit"
+            value={securityDepositCents === null ? "Not set" : formatCurrency(securityDepositCents)}
+          />
+          <div className="flex flex-1 flex-col gap-2">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
+              Resident allocations
+            </p>
+            {billingResponsibility === "individual" ? (
+              <div className="flex flex-col divide-y divide-parcelis-border rounded-md bg-parcelis-porcelain/60 dark:bg-parcelis-charcoal/55">
+                {residents.map((resident) => (
+                  <div className="flex items-center justify-between gap-4 px-4 py-3" key={resident.id}>
+                    <span className="text-sm font-medium text-parcelis-charcoal dark:text-white">
+                      {resident.firstName} {resident.lastName}
+                    </span>
+                    <div className="flex flex-col items-end gap-1 text-sm font-semibold text-parcelis-charcoal dark:text-white">
+                      <span>Rent: {formatCurrency(allocationsByTenantId.get(resident.id)?.rentShareCents ?? 0)}</span>
+                      <span>Deposit: {formatCurrency(allocationsByTenantId.get(resident.id)?.depositShareCents ?? 0)}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm leading-6 text-parcelis-gray dark:text-white/65">
+                All residents are jointly responsible for the security deposit.
+              </p>
+            )}
+          </div>
+        </div>
+      </section>
+      <section className="rounded-lg border border-parcelis-border dark:bg-parcelis-slate">
+        <ReviewSectionHeader onEdit={() => onEdit("residents")} title="Billing" />
+        <div className="flex flex-col gap-4 p-4 md:flex-row">
+          <ReviewDetail label="Partial payments" value={allowPartialPayments ? "Allowed" : "Not allowed"} />
+          <div className="flex flex-1 flex-col gap-1 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
+            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
+              Rent invoices
+            </p>
+            <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">Not generated for draft leases</p>
+            <p className="mt-1 text-sm leading-6 text-parcelis-gray dark:text-white/65">
+              Generate rent invoices when this lease is activated.
+            </p>
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ReviewSectionHeader({ onEdit, title }: { onEdit: () => void; title: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 border-b border-parcelis-border px-4 py-3">
+      <h3 className="font-semibold text-parcelis-charcoal dark:text-white">{title}</h3>
+      <Button onClick={onEdit} size="sm" type="button" variant="secondary">
+        Edit
+      </Button>
+    </div>
+  );
+}
+
+function ReviewDetail({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-40 flex-1 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
+      <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">{label}</p>
+      <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">{value}</p>
+    </div>
+  );
+}
+
 export default function NewLeasePage() {
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -1734,6 +1952,25 @@ export default function NewLeasePage() {
                       propertyId={draft.propertyId}
                       rentDueDay={draft.rentDueDay}
                       startsOn={draft.startsOn}
+                      termType={draft.termType}
+                      unitId={draft.unitId}
+                    />
+                  ) : currentIndex === 3 ? (
+                    <LeaseReviewPropertyAndUnit
+                      allowPartialPayments={draft.allowPartialPayments}
+                      billingResponsibility={draft.billingResponsibility}
+                      endsOn={draft.endsOn}
+                      monthlyRentCents={draft.monthlyRentCents}
+                      onEdit={(stepId) => {
+                        setStepError(null);
+                        setDraft((current) => ({ ...current, currentStep: stepId }));
+                      }}
+                      propertyId={draft.propertyId}
+                      rentDueDay={draft.rentDueDay}
+                      securityDepositCents={draft.securityDepositCents}
+                      startsOn={draft.startsOn}
+                      tenantIds={draft.tenantIds}
+                      tenantAllocations={draft.tenantAllocations}
                       termType={draft.termType}
                       unitId={draft.unitId}
                     />
