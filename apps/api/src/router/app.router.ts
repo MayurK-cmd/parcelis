@@ -107,7 +107,6 @@ import { requireAdministrator, requireOrganizationAdministrator } from "../modul
 import { hashPassword } from "../modules/auth";
 import { getRolePermissions, requireNotePermission, requirePermission } from "../modules/permissions";
 import { organizationProcedure, organizationProcedure as publicProcedure, router } from "./trpc";
-import { renderInvoicePdf } from "../modules/invoice-pdf";
 
 const propertySelect = {
   id: true,
@@ -1594,7 +1593,7 @@ export const appRouter = router({
                     unit: { select: { name: true } },
                     property: { select: { id: true, name: true } },
                     invoices: {
-                      where: { tenantId: input.id },
+                      where: { recipients: { some: { tenantId: input.id } } },
                       select: {
                         id: true,
                         status: true,
@@ -1857,20 +1856,33 @@ export const appRouter = router({
                 throw new TRPCError({ code: "CONFLICT", message: "The selected unit already has an active lease." });
               }
 
+              const allocationsByTenantId = new Map(
+                input.tenantAllocations.map((allocation) => [allocation.tenantId, allocation]),
+              );
+
               const lease = await tx.lease.create({
                 data: {
                   organizationId: ctx.organization.organizationId,
                   propertyId: input.propertyId,
                   unitId: input.unitId,
+                  securityDepositCents: input.securityDepositCents,
+                  billingResponsibility: input.billingResponsibility,
+                  allowPartialPayments: input.allowPartialPayments,
                   monthlyRentCents: input.monthlyRentCents,
                   startsOn: input.startsOn,
                   endsOn: input.endsOn,
                   status: input.status,
                   tenants: {
-                    create: input.tenantIds.map((tenantId) => ({
-                      organizationId: ctx.organization.organizationId,
-                      tenantId,
-                    })),
+                    create: input.tenantIds.map((tenantId) => {
+                      const allocation = allocationsByTenantId.get(tenantId);
+
+                      return {
+                        organizationId: ctx.organization.organizationId,
+                        tenantId,
+                        rentShareCents: allocation?.rentShareCents,
+                        depositShareCents: allocation?.depositShareCents,
+                      };
+                    }),
                   },
                 },
                 include: {
@@ -1910,6 +1922,17 @@ export const appRouter = router({
         if (lease) await requirePermission(ctx.prisma, ctx.user.role, "leases", "delete");
         if (invoice) await requirePermission(ctx.prisma, ctx.user.role, "invoices", "delete");
         await ctx.prisma.$transaction(async (tx) => {
+          const payment = await tx.invoicePayment.findFirst({
+            where: { OR: [{ tenantId: input.id }, { invoice: { tenantId: input.id } }] },
+            select: { id: true },
+          });
+          if (payment) {
+            throw new TRPCError({
+              code: "CONFLICT",
+              message: "A tenant with payment history cannot be deleted.",
+            });
+          }
+
           // Find all active leases this tenant is on
           const tenantLeases = await tx.leaseTenant.findMany({
             where: { tenantId: input.id },
@@ -1921,6 +1944,18 @@ export const appRouter = router({
           for (const tl of tenantLeases) {
             leaseIdsToDelete.add(tl.leaseId);
           }
+
+          const jointInvoices = await tx.invoice.findMany({
+            where: { tenantId: input.id, lease: { billingResponsibility: "joint" } },
+            select: { id: true, recipients: { select: { tenantId: true } } },
+          });
+          await Promise.all(
+            jointInvoices.map((invoice) => {
+              const replacementTenantId = invoice.recipients.find(({ tenantId }) => tenantId !== input.id)?.tenantId;
+              if (!replacementTenantId) return Promise.resolve();
+              return tx.invoice.update({ where: { id: invoice.id }, data: { tenantId: replacementTenantId } });
+            }),
+          );
 
           await tx.invoice.deleteMany({ where: { tenantId: input.id } });
           await tx.leaseTenant.deleteMany({ where: { tenantId: input.id } });
@@ -1967,7 +2002,7 @@ export const appRouter = router({
       const invoices = await ctx.prisma.invoice.findMany({
         where: {
           organizationId: ctx.organization.organizationId,
-          ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+          ...(input.tenantId ? { recipients: { some: { tenantId: input.tenantId } } } : {}),
         },
         include: {
           lease: { select: { unit: { select: { name: true } } } },
@@ -1989,6 +2024,7 @@ export const appRouter = router({
         include: {
           property: { select: { id: true, name: true } },
           tenant: { select: { id: true, firstName: true, lastName: true } },
+          recipients: { include: { tenant: { select: { id: true, firstName: true, lastName: true } } } },
           lease: { select: { startsOn: true, endsOn: true, unit: { select: { name: true } } } },
           items: { orderBy: { id: "asc" } },
           payments: {
@@ -2046,6 +2082,7 @@ export const appRouter = router({
         ...invoice,
         lease: { unitLabel: invoice.lease.unit.name },
       };
+      const { renderInvoicePdf } = await import("../modules/invoice-pdf");
       return {
         contentBase64: (await renderInvoicePdf(pdfInvoice, organizationLogo, organization)).toString("base64"),
         fileName,
@@ -2055,7 +2092,13 @@ export const appRouter = router({
       await requirePermission(ctx.prisma, ctx.user.role, "invoices", "create");
       const lease = await ctx.prisma.lease.findFirst({
         where: { id: input.leaseId, organizationId: ctx.organization.organizationId },
-        select: { id: true, propertyId: true },
+        select: {
+          id: true,
+          propertyId: true,
+          billingResponsibility: true,
+          allowPartialPayments: true,
+          tenants: { select: { tenantId: true } },
+        },
       });
       if (!lease || lease.propertyId !== input.propertyId) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Select a lease for the chosen property." });
@@ -2068,6 +2111,8 @@ export const appRouter = router({
       if (!leaseTenant) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "The selected tenant is not on this lease." });
       }
+      const recipientTenantIds =
+        lease.billingResponsibility === "joint" ? lease.tenants.map(({ tenantId }) => tenantId) : [input.tenantId];
 
       const amountCents = input.items.reduce((total, item) => total + item.quantity * item.rateCents, 0);
       if (amountCents <= 0) {
@@ -2076,61 +2121,85 @@ export const appRouter = router({
       if (input.paidCents > amountCents) {
         throw new TRPCError({ code: "BAD_REQUEST", message: "Already paid cannot exceed the invoice total." });
       }
+      if (!lease.allowPartialPayments && input.paidCents > 0 && input.paidCents !== amountCents) {
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: "This lease requires the invoice to be paid in full.",
+        });
+      }
       const dueOn = new Date(input.dueOn);
       dueOn.setUTCHours(0, 0, 0, 0);
 
-      try {
-        return await ctx.prisma.$transaction(async (tx) => {
-          const existingInvoice = await tx.invoice.findFirst({
-            where: {
-              leaseId: lease.id,
-              tenantId: input.tenantId,
-              periodStartsOn: dueOn,
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          return await ctx.prisma.$transaction(
+            async (tx) => {
+              const existingInvoice = await tx.invoice.findFirst({
+                where: {
+                  leaseId: lease.id,
+                  ...(lease.billingResponsibility === "joint" ? {} : { tenantId: input.tenantId }),
+                  periodStartsOn: dueOn,
+                },
+                select: { invoiceNumber: true },
+              });
+              if (existingInvoice) {
+                throw new TRPCError({
+                  code: "CONFLICT",
+                  message: `An invoice already exists for this lease and billing date (${formatInvoiceNumber(existingInvoice.invoiceNumber)}).`,
+                });
+              }
+              // Create the invoice with its items and recipients
+              const invoice = await tx.invoice.create({
+                data: {
+                  organizationId: ctx.organization.organizationId,
+                  leaseId: lease.id,
+                  propertyId: lease.propertyId,
+                  tenantId: input.tenantId,
+                  recipients: {
+                    create: recipientTenantIds.map((tenantId) => ({
+                      organizationId: ctx.organization.organizationId,
+                      tenantId,
+                    })),
+                  },
+                  periodStartsOn: dueOn,
+                  periodEndsOn: dueOn,
+                  dueOn,
+                  amountCents,
+                  balanceCents: amountCents - input.paidCents,
+                  status: getInvoiceStatus(dueOn, amountCents - input.paidCents),
+                  paidOn: input.paidCents === amountCents ? dueOn : null,
+                  items: {
+                    create: input.items.map((item) => ({
+                      ...item,
+                      description: item.description || null,
+                      amountCents: item.quantity * item.rateCents,
+                    })),
+                  },
+                },
+                include: { items: true },
+              });
+              await recordInvoiceActivity(tx, invoice, "invoice.created");
+              return invoice;
             },
-            select: { invoiceNumber: true },
-          });
-          if (existingInvoice) {
+            { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+          );
+        } catch (error) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034" && attempt < 2) {
+            continue;
+          }
+          if (
+            error instanceof Prisma.PrismaClientKnownRequestError &&
+            (error.code === "P2002" || error.code === "P2034")
+          ) {
             throw new TRPCError({
               code: "CONFLICT",
-              message: `An invoice already exists for this lease and billing date (${formatInvoiceNumber(existingInvoice.invoiceNumber)}).`,
+              message: "An invoice already exists for this lease and billing date.",
             });
           }
-
-          const invoice = await tx.invoice.create({
-            data: {
-              organizationId: ctx.organization.organizationId,
-              leaseId: lease.id,
-              propertyId: lease.propertyId,
-              tenantId: input.tenantId,
-              periodStartsOn: dueOn,
-              periodEndsOn: dueOn,
-              dueOn,
-              amountCents,
-              balanceCents: amountCents - input.paidCents,
-              status: getInvoiceStatus(dueOn, amountCents - input.paidCents),
-              paidOn: input.paidCents === amountCents ? dueOn : null,
-              items: {
-                create: input.items.map((item) => ({
-                  ...item,
-                  description: item.description || null,
-                  amountCents: item.quantity * item.rateCents,
-                })),
-              },
-            },
-            include: { items: true },
-          });
-          await recordInvoiceActivity(tx, invoice, "invoice.created");
-          return invoice;
-        });
-      } catch (error) {
-        if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-          throw new TRPCError({
-            code: "CONFLICT",
-            message: "An invoice already exists for this lease and billing date.",
-          });
+          throw error;
         }
-        throw error;
       }
+      throw new TRPCError({ code: "CONFLICT", message: "An invoice already exists for this lease and billing date." });
     }),
     recordPayment: publicProcedure.input(recordInvoicePaymentInputSchema).mutation(async ({ ctx, input }) => {
       await requirePermission(ctx.prisma, ctx.user.role, "invoices", "edit");
@@ -2145,18 +2214,35 @@ export const appRouter = router({
                 propertyId: true,
                 dueOn: true,
                 balanceCents: true,
-                tenantId: true,
+                recipients: {
+                  select: { tenantId: true },
+                },
+                lease: {
+                  select: { allowPartialPayments: true },
+                },
               },
             });
-            if (input.paidByTenantId !== invoice.tenantId) {
-              throw new TRPCError({ code: "BAD_REQUEST", message: "Select a tenant assigned to this unit." });
+            const responsibleTenantIds = new Set(invoice.recipients.map(({ tenantId }) => tenantId));
+
+            if (!responsibleTenantIds.has(input.paidByTenantId)) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Select a tenant responsible for this invoice.",
+              });
             }
             if (input.amountCents > invoice.balanceCents) {
               throw new TRPCError({ code: "BAD_REQUEST", message: "Payment cannot exceed the remaining balance." });
             }
+            if (!invoice.lease.allowPartialPayments && input.amountCents !== invoice.balanceCents) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "This lease requires the invoice to be paid in full.",
+              });
+            }
             const balanceCents = invoice.balanceCents - input.amountCents;
             const payment = await tx.invoicePayment.create({
               data: {
+                organizationId: ctx.organization.organizationId,
                 invoiceId: input.id,
                 tenantId: input.paidByTenantId,
                 amountCents: input.amountCents,
@@ -2207,14 +2293,34 @@ export const appRouter = router({
           async (tx) => {
             const invoice = await tx.invoice.findFirstOrThrow({
               where: { id: input.id, organizationId: ctx.organization.organizationId },
-              select: { dueOn: true, balanceCents: true, tenantId: true },
+              select: {
+                dueOn: true,
+                balanceCents: true,
+                recipients: {
+                  select: { tenantId: true },
+                },
+                lease: {
+                  select: { allowPartialPayments: true },
+                },
+              },
             });
-            if (input.payments.some((payment) => payment.paidByTenantId !== invoice.tenantId)) {
-              throw new TRPCError({ code: "BAD_REQUEST", message: "Select a tenant assigned to this unit." });
+            const responsibleTenantIds = new Set(invoice.recipients.map(({ tenantId }) => tenantId));
+
+            if (input.payments.some(({ paidByTenantId }) => !responsibleTenantIds.has(paidByTenantId))) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Select a tenant responsible for this invoice.",
+              });
             }
             const paymentTotalCents = input.payments.reduce((total, payment) => total + payment.amountCents, 0);
             if (paymentTotalCents > invoice.balanceCents) {
               throw new TRPCError({ code: "BAD_REQUEST", message: "Payments cannot exceed the remaining balance." });
+            }
+            if (!invoice.lease.allowPartialPayments && paymentTotalCents !== invoice.balanceCents) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "This lease requires the invoice to be paid in full.",
+              });
             }
             const balanceCents = invoice.balanceCents - paymentTotalCents;
             const latestPayment = input.payments.reduce((latest, payment) =>
@@ -2225,6 +2331,7 @@ export const appRouter = router({
               payments.push(
                 await tx.invoicePayment.create({
                   data: {
+                    organizationId: ctx.organization.organizationId,
                     invoiceId: input.id,
                     tenantId: payment.paidByTenantId,
                     amountCents: payment.amountCents,
@@ -3306,7 +3413,8 @@ export const appRouter = router({
         if (input.generateInvoices) {
           await requirePermission(ctx.prisma, ctx.user.role, "invoices", "create");
         }
-        const { propertyId, unitId, tenantIds, generateInvoices, ...leaseData } = input;
+        const { propertyId, unitId, tenantIds, tenantAllocations, generateInvoices, ...leaseData } = input;
+        const allocationsByTenantId = new Map(tenantAllocations.map((allocation) => [allocation.tenantId, allocation]));
         for (let attempt = 0; attempt < 3; attempt += 1) {
           try {
             return await ctx.prisma.$transaction(
@@ -3346,10 +3454,16 @@ export const appRouter = router({
                     unitId,
                     ...leaseData,
                     tenants: {
-                      create: tenantIds.map((tenantId) => ({
-                        organizationId: ctx.organization.organizationId,
-                        tenantId,
-                      })),
+                      create: tenantIds.map((tenantId) => {
+                        const allocation = allocationsByTenantId.get(tenantId);
+
+                        return {
+                          organizationId: ctx.organization.organizationId,
+                          tenantId,
+                          rentShareCents: allocation?.rentShareCents,
+                          depositShareCents: allocation?.depositShareCents,
+                        };
+                      }),
                     },
                   },
                   include: {
@@ -3387,29 +3501,66 @@ export const appRouter = router({
                     }
                   }
 
+                  const invoicePlans =
+                    createdLease.billingResponsibility === "joint"
+                      ? [
+                          {
+                            amountCents: createdLease.monthlyRentCents,
+                            depositCents: createdLease.securityDepositCents,
+                            primaryTenantId: tenantIds[0]!,
+                            recipientIds: tenantIds,
+                          },
+                        ]
+                      : tenantIds.map((tenantId) => ({
+                          amountCents: allocationsByTenantId.get(tenantId)!.rentShareCents,
+                          depositCents: allocationsByTenantId.get(tenantId)!.depositShareCents,
+                          primaryTenantId: tenantId,
+                          recipientIds: [tenantId],
+                        }));
                   for (const periodStartsOn of periods) {
                     const periodEndsOn = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth() + 1, 0);
                     const dueOn = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth(), 1);
 
-                    for (const tenant of tenants) {
+                    for (const invoicePlan of invoicePlans) {
+                      const depositCents =
+                        periodStartsOn.getTime() === firstPeriod.getTime() ? invoicePlan.depositCents : 0;
+                      const amountCents = invoicePlan.amountCents + depositCents;
                       await tx.invoice.create({
                         data: {
                           organizationId: ctx.organization.organizationId,
                           leaseId: createdLease.id,
                           propertyId,
-                          tenantId: tenant.id,
+                          tenantId: invoicePlan.primaryTenantId,
                           periodStartsOn,
                           periodEndsOn,
                           dueOn,
-                          amountCents: createdLease.monthlyRentCents,
-                          balanceCents: createdLease.monthlyRentCents,
+                          amountCents,
+                          balanceCents: amountCents,
+                          recipients: {
+                            create: invoicePlan.recipientIds.map((tenantId) => ({
+                              organizationId: ctx.organization.organizationId,
+                              tenantId,
+                            })),
+                          },
                           items: {
-                            create: {
-                              item: "Rent",
-                              quantity: 1,
-                              rateCents: createdLease.monthlyRentCents,
-                              amountCents: createdLease.monthlyRentCents,
-                            },
+                            create: [
+                              {
+                                item: "Rent",
+                                quantity: 1,
+                                rateCents: invoicePlan.amountCents,
+                                amountCents: invoicePlan.amountCents,
+                              },
+                              ...(depositCents > 0
+                                ? [
+                                    {
+                                      item: "Security deposit",
+                                      quantity: 1,
+                                      rateCents: depositCents,
+                                      amountCents: depositCents,
+                                    },
+                                  ]
+                                : []),
+                            ],
                           },
                         },
                       });
