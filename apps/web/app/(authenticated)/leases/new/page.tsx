@@ -8,6 +8,8 @@ import { toast } from "sonner";
 import {
   ArrowLeft,
   Building2,
+  CalendarDays,
+  CalendarRange,
   ChevronRight,
   DoorOpen,
   FileText,
@@ -21,15 +23,21 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
+  AlertDescription,
   AlertTitle,
   Button,
+  Calendar,
   Card,
   CardContent,
   CardHeader,
   Checkbox,
   Input,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   RadioGroup,
   RadioGroupItem,
+  Select,
   Switch,
   Table,
   TableBody,
@@ -40,7 +48,7 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@parcelis/ui";
-import { leasePropertyStepSchema, leaseTenantBillingStepSchema, type CreatePropertyInput } from "@parcelis/schemas";
+import { leasePropertyStepSchema, leaseTenantBillingStepSchema, leaseTermsStepSchema, type CreatePropertyInput, } from "@parcelis/schemas";
 import { apiClient, queryKeys } from "../../../../components/api-client";
 import { LeaseCreationStepper, leaseCreationSteps } from "../../../../components/lease-creation-stepper";
 import { LoadingState } from "../../../../components/loading-state";
@@ -55,18 +63,17 @@ import { TenantDrawer, initialTenantFormState, type TenantFormState } from "../.
 import { uploadTenantImage } from "../../../../components/tenant-image-upload";
 
 type LeaseDraft = {
-  version: 4;
+  version: 5;
   currentStep: string;
   propertyId: number | null;
   unitId: number | null;
   tenantIds: number[];
   termType: "fixed" | "month_to_month";
-  continueMonthToMonthAfterEnd: boolean;
   startsOn: string;
   endsOn: string;
   monthlyRentCents: number | null;
   securityDepositCents: number | null;
-  billingDay: number | null;
+  rentDueDay: number;
   billingResponsibility: "joint" | "individual";
   allowPartialPayments: boolean;
   tenantAllocations: Array<{
@@ -76,34 +83,32 @@ type LeaseDraft = {
   }>;
 };
 
-type LeaseDraftV3 = Omit<LeaseDraft, "version" | "securityDepositCents" | "billingResponsibility" | "allowPartialPayments" | "tenantAllocations"> & {
+type LeaseDraftV4 = Omit<LeaseDraft, "version" | "rentDueDay"> & {
+  version: 4;
+  billingDay: number | null;
+  continueMonthToMonthAfterEnd: boolean;
+};
+
+type LeaseDraftV3 = Omit<
+  LeaseDraftV4,
+  "version" | "securityDepositCents" | "billingResponsibility" | "allowPartialPayments" | "tenantAllocations"
+> & {
   version: 3;
   depositCents: number | null;
 };
 
-type CreatePropertyResult = {
-  imageUploadError: Error | null;
-  property: Awaited<ReturnType<typeof apiClient.properties.create.mutate>>;
-};
-
-type CreateTenantResult = {
-  imageUploadError: Error | null;
-  tenant: Awaited<ReturnType<typeof apiClient.tenants.create.mutate>>;
-};
-
 const initialLeaseDraft: LeaseDraft = {
-  version: 4,
+  version: 5,
   currentStep: leaseCreationSteps[0]?.id ?? "property",
   propertyId: null,
   unitId: null,
   tenantIds: [],
   termType: "fixed",
-  continueMonthToMonthAfterEnd: false,
   startsOn: "",
   endsOn: "",
   monthlyRentCents: null,
   securityDepositCents: null,
-  billingDay: null,
+  rentDueDay: 1,
   billingResponsibility: "joint",
   allowPartialPayments: true,
   tenantAllocations: [],
@@ -114,6 +119,37 @@ function getLeaseDraftStorageKey(organizationId: number) {
 }
 
 function isLeaseDraft(value: unknown): value is LeaseDraft {
+  if (!value || typeof value !== "object") return false;
+  const draft = value as Record<string, unknown>;
+  return (
+    draft.version === 5 &&
+    typeof draft.currentStep === "string" &&
+    leaseCreationSteps.some((step) => step.id === draft.currentStep) &&
+    (typeof draft.propertyId === "number" || draft.propertyId === null) &&
+    (typeof draft.unitId === "number" || draft.unitId === null) &&
+    Array.isArray(draft.tenantIds) &&
+    draft.tenantIds.every((tenantId) => typeof tenantId === "number") &&
+    (draft.termType === "fixed" || draft.termType === "month_to_month") &&
+    typeof draft.startsOn === "string" &&
+    typeof draft.endsOn === "string" &&
+    (typeof draft.monthlyRentCents === "number" || draft.monthlyRentCents === null) &&
+    (typeof draft.securityDepositCents === "number" || draft.securityDepositCents === null) &&
+    typeof draft.rentDueDay === "number" &&
+    (draft.billingResponsibility === "joint" || draft.billingResponsibility === "individual") &&
+    typeof draft.allowPartialPayments === "boolean" &&
+    Array.isArray(draft.tenantAllocations) &&
+    draft.tenantAllocations.every(
+      (allocation) =>
+        typeof allocation === "object" &&
+        allocation !== null &&
+        typeof (allocation as Record<string, unknown>).tenantId === "number" &&
+        typeof (allocation as Record<string, unknown>).rentShareCents === "number" &&
+        typeof (allocation as Record<string, unknown>).depositShareCents === "number",
+    )
+  );
+}
+
+function isLeaseDraftV4(value: unknown): value is LeaseDraftV4 {
   if (!value || typeof value !== "object") return false;
   const draft = value as Record<string, unknown>;
   return (
@@ -168,16 +204,45 @@ function isLeaseDraftV3(value: unknown): value is LeaseDraftV3 {
 
 function migrateLeaseDraft(value: unknown): LeaseDraft | null {
   if (isLeaseDraft(value)) return value;
-  if (!isLeaseDraftV3(value)) return null;
+  if (isLeaseDraftV3(value)) {
+    return {
+      version: 5,
+      currentStep: value.currentStep,
+      propertyId: value.propertyId,
+      unitId: value.unitId,
+      tenantIds: value.tenantIds,
+      termType: value.continueMonthToMonthAfterEnd ? "month_to_month" : value.termType,
+      startsOn: value.startsOn,
+      endsOn: value.continueMonthToMonthAfterEnd ? "" : value.endsOn,
+      monthlyRentCents: value.monthlyRentCents,
+      securityDepositCents: value.depositCents,
+      rentDueDay:
+        typeof value.billingDay === "number" && value.billingDay >= 1 && value.billingDay <= 31
+          ? value.billingDay
+          : 1,
+      billingResponsibility: "joint",
+      allowPartialPayments: true,
+      tenantAllocations: [],
+    };
+  }
+  if (!isLeaseDraftV4(value)) return null;
 
-  const { depositCents, ...draft } = value;
   return {
-    ...draft,
-    version: 4,
-    securityDepositCents: depositCents,
-    billingResponsibility: "joint",
-    allowPartialPayments: true,
-    tenantAllocations: [],
+    version: 5,
+    currentStep: value.currentStep,
+    propertyId: value.propertyId,
+    unitId: value.unitId,
+    tenantIds: value.tenantIds,
+    termType: value.continueMonthToMonthAfterEnd ? "month_to_month" : value.termType,
+    startsOn: value.startsOn,
+    endsOn: value.continueMonthToMonthAfterEnd ? "" : value.endsOn,
+    monthlyRentCents: value.monthlyRentCents,
+    securityDepositCents: value.securityDepositCents,
+    rentDueDay:
+      typeof value.billingDay === "number" && value.billingDay >= 1 && value.billingDay <= 31 ? value.billingDay : 1,
+    billingResponsibility: value.billingResponsibility,
+    allowPartialPayments: value.allowPartialPayments,
+    tenantAllocations: value.tenantAllocations,
   };
 }
 
@@ -185,6 +250,16 @@ function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
+    maximumFractionDigits: 0,
+  }).format(cents / 100);
+}
+
+function formatCurrencyExact(cents: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
   }).format(cents / 100);
 }
 
@@ -198,38 +273,29 @@ function parseCurrencyInput(value: string) {
   return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) : null;
 }
 
-function CurrencyInput({
-  cents,
-  onCentsChange,
-}: {
-  cents: number | null;
-  onCentsChange: (cents: number | null) => void;
-}) {
-  const [inputValue, setInputValue] = React.useState(() => formatCurrencyInput(cents));
-  const [isFocused, setIsFocused] = React.useState(false);
+function parseDateInput(value: string) {
+  if (!value) return undefined;
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return undefined;
+  return new Date(year, month - 1, day);
+}
 
-  React.useEffect(() => {
-    if (!isFocused) setInputValue(formatCurrencyInput(cents));
-  }, [cents, isFocused]);
+function formatDateInput(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
 
-  return (
-    <Input
-      inputMode="decimal"
-      min="0"
-      onBlur={() => {
-        setIsFocused(false);
-        const nextCents = parseCurrencyInput(inputValue);
-        onCentsChange(nextCents);
-        setInputValue(formatCurrencyInput(nextCents));
-      }}
-      onChange={(event) => setInputValue(event.target.value)}
-      onFocus={() => setIsFocused(true)}
-      placeholder="0.00"
-      step="0.01"
-      type="number"
-      value={inputValue}
-    />
-  );
+function formatDateLabel(date: Date) {
+  return new Intl.DateTimeFormat("en-US", { day: "numeric", month: "long", year: "numeric" }).format(date);
+}
+
+function formatDayOfMonth(day: number) {
+  const remainder = day % 100;
+  if (remainder >= 11 && remainder <= 13) return `${day}th`;
+  const suffix = day % 10 === 1 ? "st" : day % 10 === 2 ? "nd" : day % 10 === 3 ? "rd" : "th";
+  return `${day}${suffix}`;
 }
 
 function formatPercentage(cents: number, totalCents: number | null) {
@@ -266,45 +332,8 @@ function createEqualTenantAllocations(
   }));
 }
 
-function rescaleTenantAllocations(
-  tenantIds: number[],
-  allocations: LeaseDraft["tenantAllocations"],
-  monthlyRentCents: number | null,
-  securityDepositCents: number | null,
-): LeaseDraft["tenantAllocations"] {
-  const synchronizedAllocations = synchronizeTenantAllocations(tenantIds, allocations);
-
-  function rescale(field: "rentShareCents" | "depositShareCents", totalCents: number | null) {
-    if (!totalCents) return Array.from({ length: synchronizedAllocations.length }, () => 0);
-
-    const existingTotal = synchronizedAllocations.reduce((total, allocation) => total + allocation[field], 0);
-    if (!existingTotal) return splitCentsEvenly(totalCents, synchronizedAllocations.length);
-
-    const shares = synchronizedAllocations.map((allocation) => Math.floor((allocation[field] * totalCents) / existingTotal));
-    let remainder = totalCents - shares.reduce((total, share) => total + share, 0);
-    for (let index = 0; remainder > 0; index = (index + 1) % shares.length) {
-      shares[index] = (shares[index] ?? 0) + 1;
-      remainder -= 1;
-    }
-    return shares;
-  }
-
-  const rentShares = rescale("rentShareCents", monthlyRentCents);
-  const depositShares = rescale("depositShareCents", securityDepositCents);
-  return synchronizedAllocations.map((allocation, index) => ({
-    ...allocation,
-    rentShareCents: rentShares[index] ?? 0,
-    depositShareCents: depositShares[index] ?? 0,
-  }));
-}
-
-function synchronizeTenantAllocations(
-  tenantIds: number[],
-  allocations: LeaseDraft["tenantAllocations"],
-) {
-  const allocationsByTenantId = new Map(
-    allocations.map((allocation) => [allocation.tenantId, allocation]),
-  );
+function synchronizeTenantAllocations(tenantIds: number[], allocations: LeaseDraft["tenantAllocations"]) {
+  const allocationsByTenantId = new Map(allocations.map((allocation) => [allocation.tenantId, allocation]));
 
   return tenantIds.map(
     (tenantId) =>
@@ -324,7 +353,7 @@ function PropertySelector({
 }: {
   error: string | null;
   onAddProperty: () => void;
-  onValueChange: (selection: { propertyId: number; unitId: number }) => void;
+  onValueChange: (selection: { propertyId: number; unitId: number; monthlyRentCents: number }) => void;
   value: number | null;
 }) {
   const [expandedPropertyIds, setExpandedPropertyIds] = React.useState<Set<number>>(() => new Set());
@@ -475,7 +504,13 @@ function PropertySelector({
                                   } ${isSelected ? "bg-parcelis-green/10" : "bg-parcelis-porcelain/45"}`}
                                   key={unit.id}
                                   onClick={() => {
-                                    if (unit.isAvailable) onValueChange({ propertyId: property.id, unitId: unit.id });
+                                    if (unit.isAvailable) {
+                                      onValueChange({
+                                        propertyId: property.id,
+                                        unitId: unit.id,
+                                        monthlyRentCents: unit.marketRateCents,
+                                      });
+                                    }
                                   }}
                                 >
                                   <TableCell className="px-5 py-3">
@@ -489,7 +524,13 @@ function PropertySelector({
                                         className="h-4 w-4 accent-parcelis-green"
                                         disabled={!unit.isAvailable}
                                         name="lease-unit"
-                                        onChange={() => onValueChange({ propertyId: property.id, unitId: unit.id })}
+                                        onChange={() =>
+                                          onValueChange({
+                                            propertyId: property.id,
+                                            unitId: unit.id,
+                                            monthlyRentCents: unit.marketRateCents,
+                                          })
+                                        }
                                         type="radio"
                                         value={unit.id}
                                       />
@@ -532,7 +573,13 @@ function PropertySelector({
                           } ${isSelected ? "bg-parcelis-green/10" : ""}`}
                           key={unit.id}
                           onClick={() => {
-                            if (unit.isAvailable) onValueChange({ propertyId: property.id, unitId: unit.id });
+                            if (unit.isAvailable) {
+                              onValueChange({
+                                propertyId: property.id,
+                                unitId: unit.id,
+                                monthlyRentCents: unit.marketRateCents,
+                              });
+                            }
                           }}
                         >
                           <TableCell className="px-5 py-4">
@@ -544,7 +591,13 @@ function PropertySelector({
                                 className="h-4 w-4 accent-parcelis-green"
                                 disabled={!unit.isAvailable}
                                 name="lease-unit"
-                                onChange={() => onValueChange({ propertyId: property.id, unitId: unit.id })}
+                                onChange={() =>
+                                  onValueChange({
+                                    propertyId: property.id,
+                                    unitId: unit.id,
+                                    monthlyRentCents: unit.marketRateCents,
+                                  })
+                                }
                                 type="radio"
                                 value={unit.id}
                               />
@@ -612,9 +665,7 @@ function ResidentsSelector({
   error?: string | null;
   onAddTenant: () => void;
   onAllowPartialPaymentsChange: (allowPartialPayments: boolean) => void;
-  onBillingResponsibilityChange: (
-    billingResponsibility: LeaseDraft["billingResponsibility"],
-  ) => void;
+  onBillingResponsibilityChange: (billingResponsibility: LeaseDraft["billingResponsibility"]) => void;
   onMonthlyRentCentsChange: (monthlyRentCents: number | null) => void;
   onSecurityDepositCentsChange: (securityDepositCents: number | null) => void;
   onTenantAllocationsChange: (tenantAllocations: LeaseDraft["tenantAllocations"]) => void;
@@ -628,10 +679,24 @@ function ResidentsSelector({
   const [availabilityFilter, setAvailabilityFilter] = React.useState<"available" | "all">("available");
   const [rentAllocationMode, setRentAllocationMode] = React.useState<"percentage" | "amount">("percentage");
   const [depositAllocationMode, setDepositAllocationMode] = React.useState<"percentage" | "amount">("percentage");
+  const [allocationInputs, setAllocationInputs] = React.useState<Record<string, string>>({});
+  const [monthlyRentInput, setMonthlyRentInput] = React.useState(() => formatCurrencyInput(monthlyRentCents));
+  const [securityDepositInput, setSecurityDepositInput] = React.useState(() =>
+    formatCurrencyInput(securityDepositCents),
+  );
   const tenantsQuery = useQuery({
     queryKey: queryKeys.tenants.list,
     queryFn: () => apiClient.tenants.list.query(),
   });
+
+  React.useEffect(() => {
+    setMonthlyRentInput(formatCurrencyInput(monthlyRentCents));
+  }, [monthlyRentCents]);
+
+  React.useEffect(() => {
+    setSecurityDepositInput(formatCurrencyInput(securityDepositCents));
+  }, [securityDepositCents]);
+
   const tenants = (tenantsQuery.data ?? []).filter((tenant) => tenant.tenantStatus !== "archived");
   const query = search.trim().toLowerCase();
   const filteredTenants = tenants
@@ -657,6 +722,29 @@ function ResidentsSelector({
     (total, allocation) => total + allocation.depositShareCents,
     0,
   );
+  const billingValidationMessages = [
+    ...(monthlyRentCents === null || monthlyRentCents <= 0 ? ["Enter a monthly rent amount greater than $0."] : []),
+    ...(securityDepositCents === null ? ["Enter the security deposit amount."] : []),
+    ...(billingResponsibility === "individual" && displayedAllocations.some((allocation) => allocation.rentShareCents <= 0)
+      ? ["Each tenant must have a rent allocation greater than $0.00."]
+      : []),
+    ...(billingResponsibility === "individual" && monthlyRentCents !== null && allocatedRentCents !== monthlyRentCents
+      ? [
+          `Rent allocations total ${formatCurrencyExact(allocatedRentCents)}; ${formatCurrencyExact(
+            monthlyRentCents,
+          )} is required.`,
+        ]
+      : []),
+    ...(billingResponsibility === "individual" &&
+    securityDepositCents !== null &&
+    allocatedDepositCents !== securityDepositCents
+      ? [
+          `Deposit allocations total ${formatCurrencyExact(allocatedDepositCents)}; ${formatCurrencyExact(
+            securityDepositCents,
+          )} is required.`,
+        ]
+      : []),
+  ];
 
   function toggleResidentSelection(tenantId: number) {
     onValueChange(value.includes(tenantId) ? value.filter((id) => id !== tenantId) : [...value, tenantId]);
@@ -717,7 +805,7 @@ function ResidentsSelector({
           </Button>
         </div>
       </div>
-      {error ? (
+      {error && value.length === 0 ? (
         <Alert className="rounded-none border-x-0" variant="destructive">
           <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
           <AlertTitle>{error}</AlertTitle>
@@ -820,11 +908,25 @@ function ResidentsSelector({
             <div className="flex flex-col gap-4 sm:flex-row">
               <label className="flex flex-1 flex-col gap-2 text-sm font-semibold text-parcelis-charcoal">
                 Monthly rent
-                <CurrencyInput cents={monthlyRentCents} onCentsChange={onMonthlyRentCentsChange} />
+                <Input
+                  inputMode="decimal"
+                  onBlur={() => onMonthlyRentCentsChange(parseCurrencyInput(monthlyRentInput))}
+                  onChange={(event) => setMonthlyRentInput(event.target.value)}
+                  placeholder="0.00"
+                  type="text"
+                  value={monthlyRentInput}
+                />
               </label>
               <label className="flex flex-1 flex-col gap-2 text-sm font-semibold text-parcelis-charcoal">
                 Security deposit
-                <CurrencyInput cents={securityDepositCents} onCentsChange={onSecurityDepositCentsChange} />
+                <Input
+                  inputMode="decimal"
+                  onBlur={() => onSecurityDepositCentsChange(parseCurrencyInput(securityDepositInput))}
+                  onChange={(event) => setSecurityDepositInput(event.target.value)}
+                  placeholder="0.00"
+                  type="text"
+                  value={securityDepositInput}
+                />
               </label>
             </div>
 
@@ -849,7 +951,7 @@ function ResidentsSelector({
                     type="button"
                     variant="secondary"
                   >
-                    Split equally
+                    Reset to equal shares
                   </Button>
                 ) : null}
               </div>
@@ -878,7 +980,9 @@ function ResidentsSelector({
                             Deposit
                             <ToggleGroup
                               aria-label="Deposit allocation input mode"
-                              onValueChange={(nextValue) => setDepositAllocationMode(nextValue as "percentage" | "amount")}
+                              onValueChange={(nextValue) =>
+                                setDepositAllocationMode(nextValue as "percentage" | "amount")
+                              }
                               value={depositAllocationMode}
                             >
                               <ToggleGroupItem value="percentage">%</ToggleGroupItem>
@@ -891,6 +995,18 @@ function ResidentsSelector({
                     <TableBody>
                       {selectedTenants.map((tenant) => {
                         const allocation = displayedAllocations.find((item) => item.tenantId === tenant.id)!;
+                        const rentInputKey = `${tenant.id}:rent:${rentAllocationMode}`;
+                        const depositInputKey = `${tenant.id}:deposit:${depositAllocationMode}`;
+                        const rentInputValue =
+                          allocationInputs[rentInputKey] ??
+                          (rentAllocationMode === "percentage"
+                            ? formatPercentage(allocation.rentShareCents, monthlyRentCents)
+                            : formatCurrencyInput(allocation.rentShareCents));
+                        const depositInputValue =
+                          allocationInputs[depositInputKey] ??
+                          (depositAllocationMode === "percentage"
+                            ? formatPercentage(allocation.depositShareCents, securityDepositCents)
+                            : formatCurrencyInput(allocation.depositShareCents));
                         return (
                           <TableRow key={tenant.id}>
                             <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal">
@@ -900,22 +1016,26 @@ function ResidentsSelector({
                               {billingResponsibility === "individual" ? (
                                 <Input
                                   inputMode="decimal"
-                                  min="0"
-                                  onChange={(event) =>
+                                  onBlur={() => {
                                     updateTenantAllocation(
                                       tenant.id,
                                       "rentShareCents",
-                                      event.target.value,
+                                      rentInputValue,
                                       rentAllocationMode,
-                                    )
+                                    );
+                                    setAllocationInputs((current) => {
+                                      const { [rentInputKey]: _removed, ...remaining } = current;
+                                      return remaining;
+                                    });
+                                  }}
+                                  onChange={(event) =>
+                                    setAllocationInputs((current) => ({
+                                      ...current,
+                                      [rentInputKey]: event.target.value,
+                                    }))
                                   }
-                                  step="0.01"
-                                  type="number"
-                                  value={
-                                    rentAllocationMode === "percentage"
-                                      ? formatPercentage(allocation.rentShareCents, monthlyRentCents)
-                                      : formatCurrencyInput(allocation.rentShareCents)
-                                  }
+                                  type="text"
+                                  value={rentInputValue}
                                 />
                               ) : (
                                 <span className="block py-2 font-semibold text-parcelis-charcoal">
@@ -929,22 +1049,26 @@ function ResidentsSelector({
                               {billingResponsibility === "individual" ? (
                                 <Input
                                   inputMode="decimal"
-                                  min="0"
-                                  onChange={(event) =>
+                                  onBlur={() => {
                                     updateTenantAllocation(
                                       tenant.id,
                                       "depositShareCents",
-                                      event.target.value,
+                                      depositInputValue,
                                       depositAllocationMode,
-                                    )
+                                    );
+                                    setAllocationInputs((current) => {
+                                      const { [depositInputKey]: _removed, ...remaining } = current;
+                                      return remaining;
+                                    });
+                                  }}
+                                  onChange={(event) =>
+                                    setAllocationInputs((current) => ({
+                                      ...current,
+                                      [depositInputKey]: event.target.value,
+                                    }))
                                   }
-                                  step="0.01"
-                                  type="number"
-                                  value={
-                                    depositAllocationMode === "percentage"
-                                      ? formatPercentage(allocation.depositShareCents, securityDepositCents)
-                                      : formatCurrencyInput(allocation.depositShareCents)
-                                  }
+                                  type="text"
+                                  value={depositInputValue}
                                 />
                               ) : (
                                 <span className="block py-2 font-semibold text-parcelis-charcoal">
@@ -978,6 +1102,21 @@ function ResidentsSelector({
                   Select at least one tenant to view allocations.
                 </div>
               )}
+              {billingValidationMessages.length > 0 ? (
+                <Alert className="mt-4" variant="destructive">
+                  <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+                  <div>
+                    <AlertTitle>Complete tenant billing</AlertTitle>
+                    <AlertDescription className="mt-1">
+                      <ul className="list-disc space-y-1 pl-4">
+                        {billingValidationMessages.map((message) => (
+                          <li key={message}>{message}</li>
+                        ))}
+                      </ul>
+                    </AlertDescription>
+                  </div>
+                </Alert>
+              ) : null}
             </div>
           </div>
 
@@ -995,9 +1134,12 @@ function ResidentsSelector({
               <label className="flex cursor-pointer items-start gap-3 rounded-md p-2 transition-colors hover:bg-parcelis-porcelain">
                 <RadioGroupItem className="mt-0.5" value="joint" />
                 <span>
-                  <span className="block font-semibold text-parcelis-charcoal">All tenants are equally responsible.</span>
+                  <span className="block font-semibold text-parcelis-charcoal">
+                    All tenants are equally responsible.
+                  </span>
                   <span className="mt-1 block text-sm leading-6 text-parcelis-gray">
-                    We’ll create one shared invoice. Every tenant can view the full amount and pay against the same balance.
+                    We’ll create one shared invoice. Every tenant can view the full amount and pay against the same
+                    balance.
                   </span>
                 </span>
               </label>
@@ -1018,17 +1160,234 @@ function ResidentsSelector({
             <div className="mt-8 flex items-center justify-between gap-4 border-t border-parcelis-border pt-6">
               <div>
                 <h3 className="font-semibold text-parcelis-charcoal">Partial payments</h3>
-                <p className="mt-1 text-sm leading-6 text-parcelis-gray">Tenants may submit partial invoice payments.</p>
+                <p className="mt-1 text-sm leading-6 text-parcelis-gray">
+                  Tenants may submit partial invoice payments.
+                </p>
               </div>
-              <Switch
-                aria-label="Allow partial payments"
-                checked={allowPartialPayments}
-                onCheckedChange={onAllowPartialPaymentsChange}
-              />
+              <Switch checked={allowPartialPayments} onCheckedChange={onAllowPartialPaymentsChange} />
             </div>
           </div>
         </div>
       </section>
+    </div>
+  );
+}
+
+function LeaseTermsSelector({
+  error,
+  endsOn,
+  onEndsOnChange,
+  onRentDueDayChange,
+  onStartsOnChange,
+  onTermTypeChange,
+  propertyId,
+  rentDueDay,
+  startsOn,
+  termType,
+  unitId,
+}: {
+  error: string | null;
+  endsOn: string;
+  onEndsOnChange: (endsOn: string) => void;
+  onRentDueDayChange: (rentDueDay: number) => void;
+  onStartsOnChange: (startsOn: string) => void;
+  onTermTypeChange: (termType: LeaseDraft["termType"]) => void;
+  propertyId: number | null;
+  rentDueDay: number;
+  startsOn: string;
+  termType: LeaseDraft["termType"];
+  unitId: number | null;
+}) {
+  const [isEndDatePickerOpen, setIsEndDatePickerOpen] = React.useState(false);
+  const [isStartDatePickerOpen, setIsStartDatePickerOpen] = React.useState(false);
+  const endDate = parseDateInput(endsOn);
+  const startDate = parseDateInput(startsOn);
+  const propertiesQuery = useQuery({
+    queryKey: queryKeys.properties.list,
+    queryFn: () => apiClient.properties.list.query(),
+  });
+  const selectedProperty = propertiesQuery.data?.find((property) => property.id === propertyId);
+  const selectedUnit = selectedProperty?.units.find((unit) => unit.id === unitId);
+
+  return (
+    <div className="flex flex-1 flex-col gap-6 p-5 md:p-6">
+      <div>
+        <h2 className="text-xl font-bold text-parcelis-charcoal">Lease terms</h2>
+        <p className="mt-1 text-sm text-parcelis-gray">Choose how long this lease will run.</p>
+      </div>
+      {error ? (
+        <Alert variant="destructive">
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <AlertTitle>{error}</AlertTitle>
+        </Alert>
+      ) : null}
+
+      <section className="flex flex-col gap-4 rounded-lg border border-parcelis-border bg-parcelis-porcelain/40 p-4 dark:bg-parcelis-charcoal/55">
+        <h3 className="text-sm font-semibold text-parcelis-charcoal dark:text-white">Selected property</h3>
+        <div className="flex flex-col gap-4 md:flex-row">
+          <div className="flex flex-1 flex-col gap-2">
+            <label className="text-sm font-medium text-parcelis-charcoal dark:text-white" htmlFor="lease-property">
+              Property
+            </label>
+            <Input
+              className="bg-white dark:bg-parcelis-slate dark:text-white"
+              id="lease-property"
+              readOnly
+              value={selectedProperty?.name ?? "Loading property…"}
+            />
+          </div>
+          <div className="flex flex-1 flex-col gap-2">
+            <label className="text-sm font-medium text-parcelis-charcoal dark:text-white" htmlFor="lease-unit">
+              Unit
+            </label>
+            <Input
+              className="bg-white dark:bg-parcelis-slate dark:text-white"
+              id="lease-unit"
+              readOnly
+              value={selectedUnit?.name ?? "Loading unit…"}
+            />
+          </div>
+        </div>
+      </section>
+
+      <RadioGroup
+        className="flex flex-col gap-3 md:flex-row"
+        onValueChange={(value) => onTermTypeChange(value as LeaseDraft["termType"])}
+        value={termType}
+      >
+        <label
+          className={`flex flex-1 cursor-pointer items-start gap-4 rounded-lg border p-4 transition-colors ${
+            termType === "fixed"
+              ? "border-parcelis-green bg-parcelis-green/10"
+              : "border-parcelis-border hover:bg-parcelis-porcelain/60"
+          }`}
+        >
+          <span
+            className={`flex size-30 shrink-0 items-center justify-center rounded-md ${
+              termType === "fixed" ? "bg-parcelis-green text-white" : "bg-parcelis-porcelain text-parcelis-gray"
+            }`}
+          >
+            <CalendarRange className="size-25" />
+          </span>
+          <span className="flex flex-1 flex-col gap-1">
+            <span className="font-semibold text-parcelis-charcoal">Fixed term</span>
+            <span className="text-sm leading-5 text-parcelis-gray">This lease runs for a fixed term, starting on the date below and ending on the date below.</span>
+          </span>
+          <RadioGroupItem className="mt-1" value="fixed" />
+        </label>
+        <label
+          className={`flex flex-1 cursor-pointer items-start gap-4 rounded-lg border p-4 transition-colors ${
+            termType === "month_to_month"
+              ? "border-parcelis-green bg-parcelis-green/10"
+              : "border-parcelis-border hover:bg-parcelis-porcelain/60"
+          }`}
+        >
+          <span
+            className={`flex size-30 shrink-0 items-center justify-center rounded-md ${
+              termType === "month_to_month"
+                ? "bg-parcelis-green text-white"
+                : "bg-parcelis-porcelain text-parcelis-gray"
+            }`}
+          >
+            <CalendarDays className="size-25" />
+          </span>
+          <span className="flex flex-1 flex-col gap-1">
+            <span className="font-semibold text-parcelis-charcoal">Month-to-month</span>
+            <span className="text-sm leading-5 text-parcelis-gray">This lease begins on the start date below and automatically renews on a month-to-month basis until terminated.</span>
+          </span>
+          <RadioGroupItem className="mt-1" value="month_to_month" />
+        </label>
+      </RadioGroup>
+
+      <div className="flex flex-col gap-4 md:flex-row">
+        <div className="flex w-full flex-col gap-2 md:max-w-sm">
+          <label className="text-sm font-semibold text-parcelis-charcoal" htmlFor="lease-start-date">
+            Lease start date
+          </label>
+        <Popover onOpenChange={setIsStartDatePickerOpen} open={isStartDatePickerOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              aria-describedby="lease-start-date-description"
+              className="justify-start font-normal"
+              id="lease-start-date"
+              type="button"
+              variant="secondary"
+            >
+              <CalendarDays className="size-4 text-parcelis-gray" />
+              {startDate ? formatDateLabel(startDate) : "Select a start date"}
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="start" className="w-auto p-0">
+            <Calendar
+              mode="single"
+              onSelect={(date) => {
+                if (!date) return;
+                onStartsOnChange(formatDateInput(date));
+                setIsStartDatePickerOpen(false);
+              }}
+              selected={startDate}
+            />
+          </PopoverContent>
+        </Popover>
+        <p className="text-sm text-parcelis-gray" id="lease-start-date-description">
+          The first day of the lease term.
+        </p>
+      </div>
+
+        {termType === "fixed" ? (
+          <div className="flex w-full flex-col gap-2 md:max-w-sm">
+          <label className="text-sm font-semibold text-parcelis-charcoal" htmlFor="lease-end-date">
+            Lease end date
+          </label>
+          <Popover onOpenChange={setIsEndDatePickerOpen} open={isEndDatePickerOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                aria-describedby="lease-end-date-description"
+                className="justify-start font-normal"
+                id="lease-end-date"
+                type="button"
+                variant="secondary"
+              >
+                <CalendarDays className="size-4 text-parcelis-gray" />
+                {endDate ? formatDateLabel(endDate) : "Select an end date"}
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent align="start" className="w-auto p-0">
+              <Calendar
+                disabled={startDate ? { before: startDate } : undefined}
+                mode="single"
+                onSelect={(date) => {
+                  if (!date) return;
+                  onEndsOnChange(formatDateInput(date));
+                  setIsEndDatePickerOpen(false);
+                }}
+                selected={endDate}
+              />
+            </PopoverContent>
+          </Popover>
+          <p className="text-sm text-parcelis-gray" id="lease-end-date-description">
+            The last day of the lease term.
+          </p>
+          </div>
+        ) : null}
+      </div>
+      <div className="flex max-w-sm flex-col gap-2">
+        <label className="text-sm font-semibold text-parcelis-charcoal dark:text-white" htmlFor="lease-rent-due-day">
+          Rent due day
+        </label>
+        <Select
+          id="lease-rent-due-day"
+          onChange={(event) => onRentDueDayChange(Number(event.target.value))}
+          value={rentDueDay}
+        >
+          {Array.from({ length: 31 }, (_, index) => index + 1).map((day) => (
+            <option key={day} value={day}>
+              {formatDayOfMonth(day)} of each month
+            </option>
+          ))}
+        </Select>
+        <p className="text-sm text-parcelis-gray">Rent is due on this day each month.</p>
+      </div>
     </div>
   );
 }
@@ -1051,83 +1410,52 @@ export default function NewLeasePage() {
   const [tenantImageFile, setTenantImageFile] = React.useState<File | null>(null);
   const [stepError, setStepError] = React.useState<string | null>(null);
   const createProperty = useMutation({
-    mutationFn: async ({
-      imageFile,
-      input,
-    }: {
-      imageFile: File | null;
-      input: CreatePropertyInput;
-    }): Promise<CreatePropertyResult> => {
+    mutationFn: async ({ imageFile, input }: { imageFile: File | null; input: CreatePropertyInput }) => {
       const property = await apiClient.properties.create.mutate(input);
-      if (!imageFile) return { imageUploadError: null, property };
-
-      try {
-        await uploadPropertyImage(property.id, imageFile);
-        return { imageUploadError: null, property };
-      } catch (error) {
-        const imageUploadError =
-          error instanceof Error ? error : new Error("The property image could not be uploaded.");
+      if (imageFile) {
         try {
-          await apiClient.properties.delete.mutate({ id: property.id });
-        } catch {
-          return { imageUploadError, property };
+          await uploadPropertyImage(property.id, imageFile);
+        } catch (error) {
+          try {
+            await apiClient.properties.delete.mutate({ id: property.id });
+          } catch {
+            throw new Error(`Property ${property.name} was created, but its image could not be uploaded.`);
+          }
+          throw error;
         }
-        throw imageUploadError;
       }
+      return property;
     },
-    onSuccess: async ({ imageUploadError, property }) => {
-      closePropertyDrawer(false, true);
-      await queryClient.invalidateQueries({ queryKey: queryKeys.properties.list });
-      if (imageUploadError) {
-        toast.error(`Property ${property.name} was created, but its image could not be uploaded.`);
-      } else {
-        toast.success(entityCreatedMessage("Property", property.name));
-      }
-    },
-  });
-
-  function closePropertyDrawer(open: boolean, force = false) {
-    if (!open && createProperty.isPending && !force) return;
-
-    setIsPropertyDrawerOpen(open);
-    if (!open) {
+    onSuccess: async (property) => {
       setPropertyForm(initialPropertyFormState);
       setPropertyImageFile(null);
-      createProperty.reset();
-    }
-  }
-
-  const createTenant = useMutation({
-    mutationFn: async ({
-      imageFile,
-      input,
-    }: {
-      imageFile: File | null;
-      input: TenantFormState;
-    }): Promise<CreateTenantResult> => {
-      const tenant = await apiClient.tenants.create.mutate(input);
-      if (!imageFile) return { imageUploadError: null, tenant };
-
-      try {
-        await uploadTenantImage(tenant.id, imageFile);
-        return { imageUploadError: null, tenant };
-      } catch (error) {
-        const imageUploadError =
-          error instanceof Error ? error : new Error("The tenant image could not be uploaded.");
-        try {
-          await apiClient.tenants.delete.mutate({ id: tenant.id });
-        } catch {
-          return { imageUploadError, tenant };
-        }
-        throw imageUploadError;
-      }
+      setIsPropertyDrawerOpen(false);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.properties.list });
+      toast.success(entityCreatedMessage("Property", property.name));
     },
-    onSuccess: async ({ imageUploadError, tenant }) => {
+  });
+  const createTenant = useMutation({
+    mutationFn: async ({ imageFile, input }: { imageFile: File | null; input: TenantFormState }) => {
+      const tenant = await apiClient.tenants.create.mutate(input);
+      if (imageFile) {
+        try {
+          await uploadTenantImage(tenant.id, imageFile);
+        } catch (error) {
+          try {
+            await apiClient.tenants.delete.mutate({ id: tenant.id });
+          } catch {
+            throw new Error(`Tenant ${tenant.firstName} ${tenant.lastName} was created, but its image could not be uploaded.`);
+          }
+          throw error;
+        }
+      }
+      return tenant;
+    },
+    onSuccess: async (tenant) => {
       setIsTenantDrawerOpen(false);
       setDraft((current) => {
-        const tenantIds = current.tenantIds.includes(tenant.id)
-          ? current.tenantIds
-          : [...current.tenantIds, tenant.id];
+        const tenantIds = current.tenantIds.includes(tenant.id) ? current.tenantIds : [...current.tenantIds, tenant.id];
+
         return {
           ...current,
           tenantIds,
@@ -1140,11 +1468,7 @@ export default function NewLeasePage() {
       setTenantForm(initialTenantFormState);
       setTenantImageFile(null);
       await queryClient.invalidateQueries({ queryKey: queryKeys.tenants.list });
-      if (imageUploadError) {
-        toast.error(`Tenant ${tenant.firstName} ${tenant.lastName} was created, but its image could not be uploaded.`);
-      } else {
-        toast.success(entityCreatedMessage("Tenant", `${tenant.firstName} ${tenant.lastName}`));
-      }
+      toast.success(entityCreatedMessage("Tenant", `${tenant.firstName} ${tenant.lastName}`));
     },
   });
   const currentIndex = leaseCreationSteps.findIndex((step) => step.id === draft.currentStep);
@@ -1153,8 +1477,6 @@ export default function NewLeasePage() {
 
   React.useEffect(() => {
     if (!storageKey) return;
-
-    setDraft(initialLeaseDraft);
     try {
       const storedDraft = window.sessionStorage.getItem(storageKey);
       if (storedDraft) {
@@ -1199,7 +1521,16 @@ export default function NewLeasePage() {
               securityDepositCents: draft.securityDepositCents,
               tenantAllocations: draft.tenantAllocations,
             })
-          : null;
+          : currentIndex === 2
+            ? leaseTermsStepSchema.safeParse({
+                termType: draft.termType,
+                startsOn: draft.startsOn,
+                endsOn: draft.endsOn,
+                monthlyRentCents: draft.monthlyRentCents,
+                rentDueDay: draft.rentDueDay,
+                continueMonthToMonthAfterEnd: false,
+              })
+            : null;
 
     if (!result) return true;
 
@@ -1208,7 +1539,12 @@ export default function NewLeasePage() {
       return true;
     }
 
-    setStepError(result.error.issues[0]?.message ?? "Complete this step to continue.");
+    const firstIssue = result.error.issues[0];
+    setStepError(
+      currentIndex === 1 && firstIssue?.path[0] !== "tenantIds"
+        ? null
+        : (firstIssue?.message ?? "Complete this step to continue."),
+    );
     return false;
   }
 
@@ -1242,7 +1578,14 @@ export default function NewLeasePage() {
         isPending={createProperty.isPending}
         onFormChange={setPropertyForm}
         onImageChange={setPropertyImageFile}
-        onOpenChange={closePropertyDrawer}
+        onOpenChange={(open) => {
+          setIsPropertyDrawerOpen(open);
+          if (!open) {
+            setPropertyForm(initialPropertyFormState);
+            setPropertyImageFile(null);
+            createProperty.reset();
+          }
+        }}
         onSubmit={(input, imageFile) => createProperty.mutate({ imageFile, input })}
         open={isPropertyDrawerOpen}
       />
@@ -1298,16 +1641,21 @@ export default function NewLeasePage() {
                 </CardHeader>
                 <CardContent
                   className={`flex min-h-80 flex-1 flex-col ${
-                    currentIndex <= 1 ? "p-0" : "items-center justify-center p-8 text-center"
+                    currentIndex <= 2 ? "p-0" : "items-center justify-center p-8 text-center"
                   }`}
                 >
                   {currentIndex === 0 ? (
                     <PropertySelector
                       error={stepError}
                       onAddProperty={() => setIsPropertyDrawerOpen(true)}
-                      onValueChange={({ propertyId, unitId }) => {
+                      onValueChange={({ propertyId, unitId, monthlyRentCents }) => {
                         setStepError(null);
-                        setDraft((current) => ({ ...current, propertyId, unitId }));
+                        setDraft((current) => ({
+                          ...current,
+                          propertyId,
+                          unitId,
+                          monthlyRentCents,
+                        }));
                       }}
                       value={draft.unitId}
                     />
@@ -1336,34 +1684,10 @@ export default function NewLeasePage() {
                         }))
                       }
                       onMonthlyRentCentsChange={(monthlyRentCents) =>
-                        setDraft((current) => ({
-                          ...current,
-                          monthlyRentCents,
-                          tenantAllocations:
-                            current.billingResponsibility === "individual"
-                              ? rescaleTenantAllocations(
-                                  current.tenantIds,
-                                  current.tenantAllocations,
-                                  monthlyRentCents,
-                                  current.securityDepositCents,
-                                )
-                              : [],
-                        }))
+                        setDraft((current) => ({ ...current, monthlyRentCents }))
                       }
                       onSecurityDepositCentsChange={(securityDepositCents) =>
-                        setDraft((current) => ({
-                          ...current,
-                          securityDepositCents,
-                          tenantAllocations:
-                            current.billingResponsibility === "individual"
-                              ? rescaleTenantAllocations(
-                                  current.tenantIds,
-                                  current.tenantAllocations,
-                                  current.monthlyRentCents,
-                                  securityDepositCents,
-                                )
-                              : [],
-                        }))
+                        setDraft((current) => ({ ...current, securityDepositCents }))
                       }
                       onTenantAllocationsChange={(tenantAllocations) =>
                         setDraft((current) => ({ ...current, tenantAllocations }))
@@ -1379,9 +1703,39 @@ export default function NewLeasePage() {
                               : [],
                         }));
                       }}
-                       securityDepositCents={draft.securityDepositCents}
-                       tenantAllocations={draft.tenantAllocations}
+                      securityDepositCents={draft.securityDepositCents}
+                      tenantAllocations={draft.tenantAllocations}
                       value={draft.tenantIds}
+                    />
+                  ) : currentIndex === 2 ? (
+                    <LeaseTermsSelector
+                      endsOn={draft.endsOn}
+                      error={stepError}
+                      onEndsOnChange={(endsOn) => {
+                        setStepError(null);
+                        setDraft((current) => ({ ...current, endsOn }));
+                      }}
+                      onRentDueDayChange={(rentDueDay) => {
+                        setStepError(null);
+                        setDraft((current) => ({ ...current, rentDueDay }));
+                      }}
+                      onStartsOnChange={(startsOn) => {
+                        setStepError(null);
+                        setDraft((current) => ({ ...current, startsOn }));
+                      }}
+                      onTermTypeChange={(termType) => {
+                        setStepError(null);
+                        setDraft((current) => ({
+                          ...current,
+                          termType,
+                          endsOn: termType === "fixed" ? current.endsOn : "",
+                        }));
+                      }}
+                      propertyId={draft.propertyId}
+                      rentDueDay={draft.rentDueDay}
+                      startsOn={draft.startsOn}
+                      termType={draft.termType}
+                      unitId={draft.unitId}
                     />
                   ) : (
                     <>

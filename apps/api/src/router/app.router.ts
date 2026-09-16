@@ -399,6 +399,11 @@ function getInvoiceStatus(dueOn: Date, balanceCents: number) {
   return dueOn < today ? ("overdue" as const) : ("open" as const);
 }
 
+export function getMonthlyDueDate(periodStartsOn: Date, rentDueDay: number) {
+  const lastDayOfMonth = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth() + 1, 0).getDate();
+  return new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth(), Math.min(rentDueDay, lastDayOfMonth));
+}
+
 async function synchronizeOverdueInvoices(prisma: PrismaClient | Prisma.TransactionClient) {
   const today = new Date();
   today.setUTCHours(0, 0, 0, 0);
@@ -1868,6 +1873,8 @@ export const appRouter = router({
                   securityDepositCents: input.securityDepositCents,
                   billingResponsibility: input.billingResponsibility,
                   allowPartialPayments: input.allowPartialPayments,
+                  rentDueDay: input.rentDueDay,
+                  continueMonthToMonthAfterEnd: input.continueMonthToMonthAfterEnd,
                   monthlyRentCents: input.monthlyRentCents,
                   startsOn: input.startsOn,
                   endsOn: input.endsOn,
@@ -3519,7 +3526,11 @@ export const appRouter = router({
                         }));
                   for (const periodStartsOn of periods) {
                     const periodEndsOn = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth() + 1, 0);
-                    const dueOn = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth(), 1);
+                    const calculatedDueOn = getMonthlyDueDate(periodStartsOn, createdLease.rentDueDay);
+                    const dueOn =
+                      periodStartsOn.getTime() === firstPeriod.getTime() && calculatedDueOn < createdLease.startsOn
+                        ? createdLease.startsOn
+                        : calculatedDueOn;
 
                     for (const invoicePlan of invoicePlans) {
                       const depositCents =

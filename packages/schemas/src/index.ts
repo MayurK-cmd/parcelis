@@ -458,7 +458,8 @@ export const leaseTermsStepSchema = z
     startsOn: z.string().date(),
     endsOn: z.union([z.string().date(), z.literal("")]),
     monthlyRentCents: z.number().int().positive().max(maxDatabaseInteger),
-    continueMonthToMonthAfterEnd: z.boolean(),
+    rentDueDay: z.number().int().min(1).max(31),
+    continueMonthToMonthAfterEnd: z.literal(false),
   })
   .refine((lease) => lease.termType !== "fixed" || Boolean(lease.endsOn), {
     message: "A fixed-term lease requires an end date.",
@@ -467,10 +468,6 @@ export const leaseTermsStepSchema = z
   .refine((lease) => lease.termType !== "month_to_month" || !lease.endsOn, {
     message: "A month-to-month lease cannot have an end date.",
     path: ["endsOn"],
-  })
-  .refine((lease) => lease.termType === "fixed" || !lease.continueMonthToMonthAfterEnd, {
-    message: "Only fixed-term leases can continue month-to-month at the end of the term.",
-    path: ["continueMonthToMonthAfterEnd"],
   })
   .refine((lease) => !lease.endsOn || lease.endsOn >= lease.startsOn, {
     message: "Lease end date must be on or after the start date.",
@@ -549,7 +546,6 @@ function validateLeaseTenantAllocations(lease: LeaseTenantBillingValues, ctx: z.
       path: ["tenantAllocations"],
     });
   }
-
   if (
     lease.tenantAllocations.some(
       (allocation) => allocation.rentShareCents + allocation.depositShareCents > maxDatabaseInteger,
@@ -579,6 +575,8 @@ export const leaseSchema = z.object({
   propertyId: idSchema,
   unitId: idSchema,
   monthlyRentCents: z.number().int().positive().max(maxDatabaseInteger),
+  rentDueDay: z.number().int().min(1).max(31),
+  continueMonthToMonthAfterEnd: z.boolean(),
   startsOn: z.coerce.date(),
   endsOn: z.coerce.date().nullable(),
   status: leaseStatusSchema,
@@ -590,6 +588,8 @@ export const createLeaseInputSchema = leaseSchema
     tenantIds: leaseTenantIdsSchema,
     billingResponsibility: leaseBillingResponsibilitySchema.default("joint"),
     allowPartialPayments: z.boolean().default(true),
+    rentDueDay: z.number().int().min(1).max(31).default(1),
+    continueMonthToMonthAfterEnd: z.literal(false).default(false),
     securityDepositCents: z.number().int().nonnegative().max(maxDatabaseInteger).default(0),
     tenantAllocations: z.array(leaseTenantAllocationSchema).max(50).default([]),
   })
