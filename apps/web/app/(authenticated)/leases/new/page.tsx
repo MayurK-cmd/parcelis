@@ -5,13 +5,29 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { toast } from "sonner";
-import { ArrowLeft, Building2, ChevronRight, DoorOpen, FileText, Plus } from "lucide-react";
+import {
+  ArrowLeft,
+  Building2,
+  ChevronRight,
+  DoorOpen,
+  FileText,
+  Mail,
+  Phone,
+  Plus,
+  Search,
+  TriangleAlert,
+  UserRound,
+} from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  Alert,
+  AlertTitle,
   Button,
   Card,
   CardContent,
   CardHeader,
+  Checkbox,
+  Input,
   Table,
   TableBody,
   TableCell,
@@ -21,7 +37,7 @@ import {
   ToggleGroup,
   ToggleGroupItem,
 } from "@parcelis/ui";
-import { leasePropertyStepSchema, type CreatePropertyInput } from "@parcelis/schemas";
+import { leasePropertyStepSchema, leaseResidentsStepSchema, type CreatePropertyInput } from "@parcelis/schemas";
 import { apiClient, queryKeys } from "../../../../components/api-client";
 import { LeaseCreationStepper, leaseCreationSteps } from "../../../../components/lease-creation-stepper";
 import { LoadingState } from "../../../../components/loading-state";
@@ -32,6 +48,8 @@ import {
 } from "../../../../components/property-drawer";
 import { uploadPropertyImage } from "../../../../components/property-image-upload";
 import { entityCreatedMessage } from "../../../../components/toast-messages";
+import { TenantDrawer, initialTenantFormState, type TenantFormState } from "../../../../components/tenant-drawer";
+import { uploadTenantImage } from "../../../../components/tenant-image-upload";
 
 type LeaseDraft = {
   version: 3;
@@ -51,6 +69,11 @@ type LeaseDraft = {
 type CreatePropertyResult = {
   imageUploadError: Error | null;
   property: Awaited<ReturnType<typeof apiClient.properties.create.mutate>>;
+};
+
+type CreateTenantResult = {
+  imageUploadError: Error | null;
+  tenant: Awaited<ReturnType<typeof apiClient.tenants.create.mutate>>;
 };
 
 const initialLeaseDraft: LeaseDraft = {
@@ -164,7 +187,10 @@ function PropertySelector({
         </Button>
       </div>
       {error ? (
-        <p className="border-b border-parcelis-border px-5 py-3 text-sm font-medium text-red-700">{error}</p>
+        <Alert className="rounded-none border-x-0" variant="destructive">
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <AlertTitle>{error}</AlertTitle>
+        </Alert>
       ) : null}
       {propertyGroups.length === 0 ? (
         <div className="p-6 text-sm text-parcelis-gray">
@@ -372,6 +398,179 @@ function PropertySelector({
   );
 }
 
+function ResidentsSelector({
+  error,
+  onAddTenant,
+  onValueChange,
+  value,
+}: {
+  error?: string | null;
+  onAddTenant: () => void;
+  onValueChange: (tenantIds: number[]) => void;
+  value: number[];
+}) {
+  const [search, setSearch] = React.useState("");
+  const [availabilityFilter, setAvailabilityFilter] = React.useState<"available" | "all">("available");
+  const tenantsQuery = useQuery({
+    queryKey: queryKeys.tenants.list,
+    queryFn: () => apiClient.tenants.list.query(),
+  });
+  const tenants = (tenantsQuery.data ?? []).filter((tenant) => tenant.tenantStatus !== "archived");
+  const query = search.trim().toLowerCase();
+  const filteredTenants = tenants
+    .filter((tenant) =>
+      [tenant.firstName, tenant.lastName, tenant.email, tenant.phone ?? ""].some((field) =>
+        field.toLowerCase().includes(query),
+      ),
+    )
+    .filter(
+      (tenant) =>
+        availabilityFilter === "all" ||
+        value.includes(tenant.id) ||
+        !tenant.leases.some((lease) => lease.status === "active" || lease.status === "notice"),
+    );
+  function toggleResidentSelection(tenantId: number) {
+    onValueChange(value.includes(tenantId) ? value.filter((id) => id !== tenantId) : [...value, tenantId]);
+  }
+
+  if (tenantsQuery.isLoading) return <LoadingState label="Loading tenants" />;
+  if (tenantsQuery.error) {
+    return <div className="p-6 text-sm font-medium text-red-700">{tenantsQuery.error.message}</div>;
+  }
+
+  return (
+    <div className="w-full text-left">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-parcelis-border px-5 py-4">
+        <div className="flex flex-wrap items-center gap-2">
+          <ToggleGroup
+            aria-label="Tenant availability"
+            onValueChange={(nextValue) => setAvailabilityFilter(nextValue as "available" | "all")}
+            value={availabilityFilter}
+          >
+            <ToggleGroupItem value="available">Available</ToggleGroupItem>
+            <ToggleGroupItem value="all">All Tenants</ToggleGroupItem>
+          </ToggleGroup>
+          <label className="flex h-10 items-center gap-2 rounded-md border border-parcelis-border bg-white px-3 text-sm text-parcelis-gray md:min-w-80">
+            <Search className="h-4 w-4" />
+            <Input
+              aria-label="Search tenants"
+              className="h-auto min-w-0 flex-1 border-0 bg-transparent p-0 focus:border-transparent"
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search tenants"
+              value={search}
+            />
+          </label>
+        </div>
+        <div className="flex items-center gap-5">
+          <span className="text-sm font-semibold text-parcelis-charcoal">
+            {value.length} {value.length === 1 ? "resident" : "residents"} selected
+          </span>
+          <Button onClick={onAddTenant} type="button">
+            <Plus className="h-4 w-4" />
+            Add Tenant
+          </Button>
+        </div>
+      </div>
+      {error ? (
+        <Alert className="rounded-none border-x-0" variant="destructive">
+          <TriangleAlert className="mt-0.5 h-4 w-4 shrink-0" />
+          <AlertTitle>{error}</AlertTitle>
+        </Alert>
+      ) : null}
+      {filteredTenants.length === 0 ? (
+        <div className="p-6 text-sm text-parcelis-gray">
+          {tenants.length === 0
+            ? "No tenants yet."
+            : availabilityFilter === "available" && !query
+              ? "No available tenants were found."
+              : "No tenants match your search."}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <Table className="min-w-[860px] border-collapse">
+            <TableHeader className="bg-parcelis-porcelain text-xs uppercase text-parcelis-gray">
+              <TableRow className="border-0">
+                <TableHead className="w-16 px-5 py-3 font-semibold">Select</TableHead>
+                <TableHead className="w-72 px-5 py-3 font-semibold">Tenant</TableHead>
+                <TableHead className="w-72 px-5 py-3 font-semibold">Contact</TableHead>
+                <TableHead className="px-5 py-3 font-semibold">Current Lease</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {filteredTenants.map((tenant) => {
+                const isSelected = value.includes(tenant.id);
+                const currentLease = tenant.leases.find(
+                  (lease) => lease.status === "active" || lease.status === "notice",
+                );
+                return (
+                  <TableRow
+                    aria-selected={isSelected}
+                    className={`border-t border-parcelis-border ${
+                      isSelected ? "bg-parcelis-green/10" : "hover:bg-parcelis-porcelain/60"
+                    }`}
+                    key={tenant.id}
+                  >
+                    <TableCell className="px-5 py-4">
+                      <Checkbox
+                        aria-label={`Select ${tenant.firstName} ${tenant.lastName}`}
+                        checked={isSelected}
+                        onCheckedChange={() => toggleResidentSelection(tenant.id)}
+                      />
+                    </TableCell>
+                    <TableCell className="px-5 py-4">
+                      <div className="flex items-center gap-3">
+                        <span className="relative flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-full bg-parcelis-porcelain text-parcelis-green">
+                          {tenant.imageUrl ? (
+                            <Image
+                              alt={`${tenant.firstName} ${tenant.lastName}`}
+                              className="object-cover"
+                              fill
+                              sizes="40px"
+                              src={tenant.imageUrl}
+                              unoptimized
+                            />
+                          ) : (
+                            <UserRound className="h-4 w-4" />
+                          )}
+                        </span>
+                        <span className="font-semibold text-parcelis-charcoal">
+                          {tenant.firstName} {tenant.lastName}
+                        </span>
+                      </div>
+                    </TableCell>
+                    <TableCell className="px-5 py-4 text-sm text-parcelis-gray">
+                      <span className="flex items-center gap-2">
+                        <Mail className="h-4 w-4 text-parcelis-green" />
+                        {tenant.email}
+                      </span>
+                      {tenant.phone ? (
+                        <span className="mt-1 flex items-center gap-2">
+                          <Phone className="h-4 w-4 text-parcelis-green" />
+                          {tenant.phone}
+                        </span>
+                      ) : null}
+                    </TableCell>
+                    <TableCell className="px-5 py-4 text-sm text-parcelis-gray">
+                      {currentLease ? (
+                        <>
+                          <span className="block font-medium text-parcelis-charcoal">{currentLease.property.name}</span>
+                          <span>Unit {currentLease.unitLabel}</span>
+                        </>
+                      ) : (
+                        "No current lease"
+                      )}
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function NewLeasePage() {
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -385,6 +584,9 @@ export default function NewLeasePage() {
   const [isPropertyDrawerOpen, setIsPropertyDrawerOpen] = React.useState(false);
   const [propertyForm, setPropertyForm] = React.useState<PropertyFormState>(initialPropertyFormState);
   const [propertyImageFile, setPropertyImageFile] = React.useState<File | null>(null);
+  const [isTenantDrawerOpen, setIsTenantDrawerOpen] = React.useState(false);
+  const [tenantForm, setTenantForm] = React.useState(initialTenantFormState);
+  const [tenantImageFile, setTenantImageFile] = React.useState<File | null>(null);
   const [stepError, setStepError] = React.useState<string | null>(null);
   const createProperty = useMutation({
     mutationFn: async ({
@@ -433,6 +635,47 @@ export default function NewLeasePage() {
     }
   }
 
+  const createTenant = useMutation({
+    mutationFn: async ({
+      imageFile,
+      input,
+    }: {
+      imageFile: File | null;
+      input: TenantFormState;
+    }): Promise<CreateTenantResult> => {
+      const tenant = await apiClient.tenants.create.mutate(input);
+      if (!imageFile) return { imageUploadError: null, tenant };
+
+      try {
+        await uploadTenantImage(tenant.id, imageFile);
+        return { imageUploadError: null, tenant };
+      } catch (error) {
+        const imageUploadError =
+          error instanceof Error ? error : new Error("The tenant image could not be uploaded.");
+        try {
+          await apiClient.tenants.delete.mutate({ id: tenant.id });
+        } catch {
+          return { imageUploadError, tenant };
+        }
+        throw imageUploadError;
+      }
+    },
+    onSuccess: async ({ imageUploadError, tenant }) => {
+      setIsTenantDrawerOpen(false);
+      setDraft((current) => ({
+        ...current,
+        tenantIds: current.tenantIds.includes(tenant.id) ? current.tenantIds : [...current.tenantIds, tenant.id],
+      }));
+      setTenantForm(initialTenantFormState);
+      setTenantImageFile(null);
+      await queryClient.invalidateQueries({ queryKey: queryKeys.tenants.list });
+      if (imageUploadError) {
+        toast.error(`Tenant ${tenant.firstName} ${tenant.lastName} was created, but its image could not be uploaded.`);
+      } else {
+        toast.success(entityCreatedMessage("Tenant", `${tenant.firstName} ${tenant.lastName}`));
+      }
+    },
+  });
   const currentIndex = leaseCreationSteps.findIndex((step) => step.id === draft.currentStep);
   const step = leaseCreationSteps[currentIndex];
   const isLastStep = currentIndex === leaseCreationSteps.length - 1;
@@ -463,23 +706,32 @@ export default function NewLeasePage() {
   }, [draft, hydratedStorageKey, storageKey]);
 
   function goBack() {
+    setStepError(null);
     const previousStep = leaseCreationSteps[currentIndex - 1];
     if (previousStep) setDraft((current) => ({ ...current, currentStep: previousStep.id }));
   }
 
   function validateCurrentStep() {
-    if (currentIndex !== 0) return true;
+    const result =
+      currentIndex === 0
+        ? leasePropertyStepSchema.safeParse({
+            propertyId: draft.propertyId,
+            unitId: draft.unitId,
+          })
+        : currentIndex === 1
+          ? leaseResidentsStepSchema.safeParse({
+              tenantIds: draft.tenantIds,
+            })
+          : null;
 
-    const result = leasePropertyStepSchema.safeParse({
-      propertyId: draft.propertyId,
-      unitId: draft.unitId,
-    });
+    if (!result) return true;
+
     if (result.success) {
       setStepError(null);
       return true;
     }
 
-    setStepError(result.error.issues[0]?.message ?? "Select a property and unit to continue.");
+    setStepError(result.error.issues[0]?.message ?? "Complete this step to continue.");
     return false;
   }
 
@@ -517,6 +769,22 @@ export default function NewLeasePage() {
         onSubmit={(input, imageFile) => createProperty.mutate({ imageFile, input })}
         open={isPropertyDrawerOpen}
       />
+      <TenantDrawer
+        drawerTitle="Add Tenant"
+        error={createTenant.error}
+        form={tenantForm}
+        imageFile={tenantImageFile}
+        isPending={createTenant.isPending}
+        onFormChange={setTenantForm}
+        onImageChange={setTenantImageFile}
+        onOpenChange={(open) => {
+          setIsTenantDrawerOpen(open);
+          if (!open) setTenantImageFile(null);
+        }}
+        onSubmit={(input, imageFile) => createTenant.mutate({ imageFile, input })}
+        open={isTenantDrawerOpen}
+        submitLabel="Add Tenant"
+      />
       <main className="flex flex-1 flex-col">
         <section className="flex flex-1 flex-col transition-[padding] duration-200 lg:pl-[var(--parcelis-sidebar-width)]">
           <header className="parcelis-mobile-nav-header sticky top-0 z-10 flex min-h-16 items-center justify-between border-b border-parcelis-border bg-white/90 px-4 backdrop-blur md:px-8">
@@ -553,7 +821,7 @@ export default function NewLeasePage() {
                 </CardHeader>
                 <CardContent
                   className={`flex min-h-80 flex-1 flex-col ${
-                    currentIndex === 0 ? "p-0" : "items-center justify-center p-8 text-center"
+                    currentIndex <= 1 ? "p-0" : "items-center justify-center p-8 text-center"
                   }`}
                 >
                   {currentIndex === 0 ? (
@@ -565,6 +833,16 @@ export default function NewLeasePage() {
                         setDraft((current) => ({ ...current, propertyId, unitId }));
                       }}
                       value={draft.unitId}
+                    />
+                  ) : currentIndex === 1 ? (
+                    <ResidentsSelector
+                      error={stepError}
+                      onAddTenant={() => setIsTenantDrawerOpen(true)}
+                      onValueChange={(tenantIds) => {
+                        setStepError(null);
+                        setDraft((current) => ({ ...current, tenantIds }));
+                      }}
+                      value={draft.tenantIds}
                     />
                   ) : (
                     <>
