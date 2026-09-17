@@ -74,7 +74,6 @@ const sidebars: SidebarsConfig = {
     {
       type: "category",
       label: "Deployment",
-<<<<<<< HEAD
       items: [
         "getting-started/deploy-with-docker",
         "getting-started/deploy-with-docker-compose",
