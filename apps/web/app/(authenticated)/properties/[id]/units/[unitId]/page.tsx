@@ -59,6 +59,7 @@ import {
   getTenantInvoicesLink,
   getUnitLink,
 } from "../../../../../../lib/entity-links";
+import { formatLeaseEndDate } from "../../../../../../lib/format";
 
 function formatStatus(status: string) {
   return status
@@ -75,7 +76,8 @@ function formatCurrency(cents: number) {
   }).format(cents / 100);
 }
 
-function formatDate(date: Date | string) {
+function formatDate(date: Date | string | null) {
+  if (!date) return "Not set";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -209,7 +211,7 @@ export default function UnitDetailPage() {
     ["Coming Due", "—", "bg-amber-400"],
     ["Monthly rent", formatCurrency(monthlyRentCents), "bg-parcelis-charcoal"],
   ];
-  const invoiceRows = lease ? getInvoiceRows(lease.startsOn, monthlyRentCents) : [];
+  const invoiceRows = lease?.startsOn ? getInvoiceRows(lease.startsOn, monthlyRentCents) : [];
 
   function openEditUnitDrawer() {
     if (!property) {
@@ -461,7 +463,7 @@ export default function UnitDetailPage() {
                             <p className="text-sm font-semibold text-parcelis-charcoal">Current Lease</p>
                             <p className="mt-1 text-sm text-parcelis-gray">
                               {formatDate(lease.startsOn)} to{" "}
-                              {lease.endsOn ? formatDate(lease.endsOn) : "Month-to-Month"}
+                              {formatLeaseEndDate(lease.endsOn, lease.termType)}
                             </p>
                           </div>
                           <span className="rounded-md bg-parcelis-porcelain px-2 py-1 text-xs font-semibold text-parcelis-charcoal">
@@ -479,7 +481,7 @@ export default function UnitDetailPage() {
                           <div>
                             <p className="text-xs font-semibold uppercase text-parcelis-gray">End</p>
                             <p className="mt-1 font-semibold text-parcelis-charcoal">
-                              {lease.endsOn ? formatDate(lease.endsOn) : "Month-to-Month"}
+                              {formatLeaseEndDate(lease.endsOn, lease.termType)}
                             </p>
                           </div>
                         </div>

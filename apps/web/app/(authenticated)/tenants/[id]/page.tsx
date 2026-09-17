@@ -59,8 +59,10 @@ import { EntityLifecycleControls } from "../../../../components/entity-lifecycle
 import { StickyNotePlusIcon } from "../../../../components/sticky-note-plus-icon";
 import { entityUpdatedMessage } from "../../../../components/toast-messages";
 import { getInvoiceLink, getPropertyLink, getTenantInvoicesLink } from "../../../../lib/entity-links";
+import { formatLeaseEndDate } from "../../../../lib/format";
 
-function formatDate(date: Date | string) {
+function formatDate(date: Date | string | null) {
+  if (!date) return "Not set";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -68,7 +70,8 @@ function formatDate(date: Date | string) {
   }).format(new Date(date));
 }
 
-function formatCurrency(cents: number) {
+function formatCurrency(cents: number | null) {
+  if (cents === null) return "Not set";
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -688,7 +691,7 @@ export default function TenantDetailPage() {
                 <MetricCard
                   icon={Building2}
                   label="Current Lease"
-                  value={currentLease ? currentLease.property.name : "None"}
+                  value={currentLease?.property?.name ?? "None"}
                   detail={
                     currentLease ? (
                       <div>
@@ -700,7 +703,7 @@ export default function TenantDetailPage() {
                           </span>
                           <span className="text-right">
                             <span className="font-semibold text-parcelis-charcoal">End</span>{" "}
-                            {currentLease.endsOn ? formatDate(currentLease.endsOn) : "Month-to-Month"}
+                            {formatLeaseEndDate(currentLease.endsOn, currentLease.termType)}
                           </span>
                         </div>
                       </div>
@@ -852,18 +855,22 @@ export default function TenantDetailPage() {
                           {tenant.leases.map((lease) => (
                             <TableRow className="border-t border-parcelis-border" key={lease.id}>
                               <TableCell className="px-5 py-4">
-                                <Link
-                                  className="font-semibold text-parcelis-charcoal hover:text-parcelis-green"
-                                  href={getPropertyLink(lease.property.id)}
-                                >
-                                  {lease.property.name}
-                                </Link>
+                                {lease.property ? (
+                                  <Link
+                                    className="font-semibold text-parcelis-charcoal hover:text-parcelis-green"
+                                    href={getPropertyLink(lease.property.id)}
+                                  >
+                                    {lease.property.name}
+                                  </Link>
+                                ) : (
+                                  "Not set"
+                                )}
                                 <p className="mt-1 text-sm text-parcelis-gray">Unit {lease.unitLabel}</p>
                               </TableCell>
                               <TableCell className="px-5 py-4 text-sm text-parcelis-gray">
                                 {formatDate(lease.startsOn)}
                                 <br />
-                                {lease.endsOn ? formatDate(lease.endsOn) : "Month-to-Month"}
+                                {formatLeaseEndDate(lease.endsOn, lease.termType)}
                               </TableCell>
                               <TableCell className="px-5 py-4 font-semibold text-parcelis-charcoal">
                                 {formatCurrency(lease.monthlyRentCents)}

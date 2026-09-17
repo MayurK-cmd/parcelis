@@ -30,6 +30,7 @@ import { InvoiceRecordDrawer } from "./invoice-record-drawer";
 import { uploadTenantImage } from "./tenant-image-upload";
 import { entityUpdatedMessage } from "./toast-messages";
 import { getTenantLink } from "../lib/entity-links";
+import { formatLeaseEndDate } from "../lib/format";
 
 type RelatedTenant = {
   id: number;
@@ -44,7 +45,8 @@ type TenantRecordDrawerProps = {
   relatedTenants: RelatedTenant[];
 };
 
-function formatCurrency(cents: number) {
+function formatCurrency(cents: number | null) {
+  if (cents === null) return "Not set";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(
     cents / 100,
   );
@@ -53,7 +55,7 @@ function formatCurrency(cents: number) {
 function formatDate(value: Date | string | null) {
   return value
     ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value))
-    : "Month-to-month";
+    : "Not set";
 }
 
 export function TenantRecordDrawer({ onOpenChange, open, relatedTenants, tenantId }: TenantRecordDrawerProps) {
@@ -204,12 +206,12 @@ export function TenantRecordDrawer({ onOpenChange, open, relatedTenants, tenantI
                       <RecordMetric
                         icon={Building2}
                         label="Property"
-                        value={currentLease.property.name}
+                        value={currentLease.property?.name ?? "Property not set"}
                         detail={`Unit ${currentLease.unitLabel}`}
                       />
                       <RecordMetric label="Monthly Rent" value={formatCurrency(currentLease.monthlyRentCents)} />
                       <RecordMetric label="Starts" value={formatDate(currentLease.startsOn)} />
-                      <RecordMetric label="Ends" value={formatDate(currentLease.endsOn)} />
+                      <RecordMetric label="Ends" value={formatLeaseEndDate(currentLease.endsOn, currentLease.termType)} />
                     </div>
                   ) : (
                     <p className="mt-3 text-sm text-parcelis-gray">No active lease.</p>

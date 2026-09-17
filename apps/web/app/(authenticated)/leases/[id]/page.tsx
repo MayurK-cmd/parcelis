@@ -27,14 +27,16 @@ import { LoadingState } from "../../../../components/loading-state";
 import { StickyNotePlusIcon } from "../../../../components/sticky-note-plus-icon";
 import { TenantRecordDrawer } from "../../../../components/tenant-record-drawer";
 import { getPropertyLink, getTenantLink, getUnitLink } from "../../../../lib/entity-links";
+import { formatLeaseEndDate } from "../../../../lib/format";
 
 function formatDate(value: Date | string | null) {
   return value
     ? new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", year: "numeric" }).format(new Date(value))
-    : "Month-to-month";
+    : "Not set";
 }
 
-function formatCurrency(cents: number) {
+function formatCurrency(cents: number | null) {
+  if (cents === null) return "Not set";
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", maximumFractionDigits: 0 }).format(
     cents / 100,
   );
@@ -229,10 +231,10 @@ export default function LeaseDetailPage() {
                       Lease details
                     </p>
                     <h1 className="mt-5 text-2xl font-bold md:text-4xl">
-                      {leaseRecord.property.name} | Unit {leaseRecord.unit.name}{" "}
+                      {leaseRecord.property?.name ?? "Not set"} | {leaseRecord.unit ? `Unit ${leaseRecord.unit.name}` : "Unit not set"}
                     </h1>
                     <p className="mt-3 text-md leading-6 text-white/75">
-                      {formatDate(leaseRecord.startsOn)} · {formatDate(leaseRecord.endsOn)}
+                      {formatDate(leaseRecord.startsOn)} · {formatLeaseEndDate(leaseRecord.endsOn, leaseRecord.termType)}
                     </p>
                   </div>
                   <div className="w-full rounded-md bg-white/10 p-4 md:w-52">
@@ -262,30 +264,36 @@ export default function LeaseDetailPage() {
                   </CardHeader>
                   <CardContent className="flex flex-wrap gap-4">
                     <Detail icon={Building2} label="Property">
-                      <Link
-                        className="font-semibold text-parcelis-green hover:underline"
-                        href={getPropertyLink(leaseRecord.property.id)}
-                      >
-                        {leaseRecord.property.name}
-                      </Link>
+                      {leaseRecord.property ? (
+                        <Link
+                          className="font-semibold text-parcelis-green hover:underline"
+                          href={getPropertyLink(leaseRecord.property.id)}
+                        >
+                          {leaseRecord.property.name}
+                        </Link>
+                      ) : (
+                        "Not set"
+                      )}
                     </Detail>
                     <Detail icon={DoorOpen} label="Unit">
-                      {unit ? (
+                      {unit && leaseRecord.property ? (
                         <Link
                           className="font-semibold text-parcelis-green hover:underline"
                           href={getUnitLink(leaseRecord.property.id, unit.id)}
                         >
-                          Unit {leaseRecord.unit.name}
+                          Unit {unit.name}
                         </Link>
+                      ) : unit ? (
+                        `Unit ${unit.name}`
                       ) : (
-                        `Unit ${leaseRecord.unit.name}`
+                        "Not set"
                       )}
                     </Detail>
                     <Detail icon={CalendarDays} label="Lease Start">
                       {formatDate(leaseRecord.startsOn)}
                     </Detail>
                     <Detail icon={CalendarRange} label="Lease End">
-                      {formatDate(leaseRecord.endsOn)}
+                      {formatLeaseEndDate(leaseRecord.endsOn, leaseRecord.termType)}
                     </Detail>
                     <Detail icon={CircleDollarSign} label="Monthly Rent">
                       {formatCurrency(leaseRecord.monthlyRentCents)}

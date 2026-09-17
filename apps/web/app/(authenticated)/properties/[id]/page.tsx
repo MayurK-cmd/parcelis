@@ -47,6 +47,7 @@ import { EntityLifecycleControls } from "../../../../components/entity-lifecycle
 import { StickyNotePlusIcon } from "../../../../components/sticky-note-plus-icon";
 import { entityUpdatedMessage } from "../../../../components/toast-messages";
 import { getMaintenanceLink, getPropertyLink, getUnitLink } from "../../../../lib/entity-links";
+import { formatLeaseEndDate } from "../../../../lib/format";
 
 
 function formatStatus(status: string) {
@@ -56,7 +57,8 @@ function formatStatus(status: string) {
     .join(" ");
 }
 
-function formatCurrency(cents: number) {
+function formatCurrency(cents: number | null) {
+  if (cents === null) return "Not set";
   return new Intl.NumberFormat("en-US", {
     style: "currency",
     currency: "USD",
@@ -64,7 +66,8 @@ function formatCurrency(cents: number) {
   }).format(cents / 100);
 }
 
-function formatDate(date: Date | string) {
+function formatDate(date: Date | string | null) {
+  if (!date) return "Not set";
   return new Intl.DateTimeFormat("en-US", {
     month: "short",
     day: "numeric",
@@ -131,7 +134,7 @@ export default function PropertyDetailPage() {
   const occupiedUnits = property?.occupiedUnits ?? 0;
   const unitCount = property?.unitCount ?? 0;
   const occupancyRate = unitCount > 0 ? Math.round((occupiedUnits / unitCount) * 100) : 0;
-  const monthlyRentCents = activeLeases.reduce((sum, lease) => sum + lease.monthlyRentCents, 0);
+  const monthlyRentCents = activeLeases.reduce((sum, lease) => sum + (lease.monthlyRentCents ?? 0), 0);
   const amountOverdueCents = activeLeases.reduce((sum, lease) => sum + lease.amountOverdueCents, 0);
   const expiringLeases90Days = activeLeases.filter((lease) => {
     const now = new Date();
@@ -521,7 +524,7 @@ export default function PropertyDetailPage() {
                               </p>
                               <p className="mt-1 text-sm text-parcelis-gray">
                                 {formatDate(lease.startsOn)} to{" "}
-                                {lease.endsOn ? formatDate(lease.endsOn) : "Month-to-Month"}
+                                {formatLeaseEndDate(lease.endsOn, lease.termType)}
                               </p>
                             </div>
                             <span className="rounded-md bg-parcelis-porcelain px-2 py-1 text-xs font-semibold text-parcelis-charcoal">
