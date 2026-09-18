@@ -61,7 +61,7 @@ When adding or removing a primary technology or service, update this file in the
 | Technology | Purpose |
 | --- | --- |
 | [Node.js 24.19.0](https://nodejs.org/) | JavaScript runtime. |
-| [pnpm 11](https://pnpm.io/) | Package management and workspace support. |
+| [pnpm 12](https://pnpm.io/) | Package management and workspace support. |
 | [Turborepo](https://turbo.build/) | Builds, linting, and type checking across the monorepo. |
 | [TypeScript](https://www.typescriptlang.org/) | Application language and type checking. |
 | [Playwright](https://playwright.dev/) | End-to-end browser testing for critical web workflows. |
