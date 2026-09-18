@@ -83,4 +83,4 @@ Direct JavaScript dependencies are declared in:
 
 ### Transitive dependency overrides
 
-`fast-uri` is pinned to `3.1.6` in `pnpm-workspace.yaml`. Update the parent dependencies that introduce it when compatible versions are available, then remove this override.
+`multer` is pinned to `2.4.0` in `pnpm-workspace.yaml` until `@nestjs/platform-express` updates its direct dependency.
