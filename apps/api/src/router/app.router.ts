@@ -3,6 +3,10 @@ import {
   createPropertyInputSchema,
   createLeaseInputSchema,
   leaseByIdInputSchema,
+  leaseDraftUpdateInputSchema,
+  leaseDraftDataSchema,
+  leaseDraftCreateInputSchema,
+  leaseDraftByKeyInputSchema,
   createLeaseWithInvoicesInputSchema,
   deleteInvoiceInputSchema,
   deleteInvoicePaymentInputSchema,
@@ -3349,6 +3353,64 @@ export const appRouter = router({
     }),
   }),
   leases: router({
+    /** Creates or retrieves the draft associated with a wizard session. */
+    createDraft: permissionProcedure("leases", "create")
+      .input(leaseDraftCreateInputSchema)
+      .mutation(async ({ ctx, input }) => {
+        const organizationId = ctx.organization.organizationId;
+        await Promise.all([
+          requirePermission(ctx.prisma, ctx.user.role, "properties", "view"),
+          requirePermission(ctx.prisma, ctx.user.role, "units", "view"),
+        ]);
+        try {
+          return await ctx.prisma.$transaction(async (tx) => {
+            const existing = await tx.lease.findUnique({
+              where: { organizationId_leaseDraftKey: { organizationId, leaseDraftKey: input.leaseDraftKey } },
+            });
+            if (existing) {
+              if (existing.status !== LeaseStatus.draft || existing.archivedAt !== null) {
+                throw new TRPCError({ code: "CONFLICT", message: "This lease draft key is already in use." });
+              }
+              return existing;
+            }
+
+            await tx.property.findFirstOrThrow({ where: { id: input.propertyId, organizationId } });
+            await tx.unit.findFirstOrThrow({ where: { id: input.unitId, propertyId: input.propertyId } });
+
+            return tx.lease.create({
+              data: {
+                organizationId,
+                leaseDraftKey: input.leaseDraftKey,
+                propertyId: input.propertyId,
+                unitId: input.unitId,
+                status: LeaseStatus.draft,
+              },
+            });
+          });
+        } catch (error) {
+          if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+            const existing = await ctx.prisma.lease.findUnique({
+              where: { organizationId_leaseDraftKey: { organizationId, leaseDraftKey: input.leaseDraftKey } },
+            });
+            if (existing?.status === LeaseStatus.draft && existing.archivedAt === null) return existing;
+          }
+          throw error;
+        }
+      }),
+    /** Loads a lease draft by its stable wizard key. */
+    draftByKey: permissionProcedure("leases", "view")
+      .input(leaseDraftByKeyInputSchema)
+      .query(({ ctx, input }) =>
+        ctx.prisma.lease.findFirst({
+          where: {
+            organizationId: ctx.organization.organizationId,
+            leaseDraftKey: input.leaseDraftKey,
+            status: LeaseStatus.draft,
+            archivedAt: null,
+          },
+          include: { tenants: true },
+        }),
+      ),
     /** Retrieves a lease and its identifying property, unit, and tenant context. */
     byId: permissionProcedure("leases", "view")
       .input(leaseByIdInputSchema)
@@ -3374,6 +3436,159 @@ export const appRouter = router({
           },
         });
         return lease ? { ...lease, tenants: lease.tenants.map(({ tenant }) => tenant) } : null;
+      }),
+    /** Saves fields on an editable lease draft using optimistic concurrency. */
+    updateDraft: permissionProcedure("leases", "edit")
+      .input(leaseDraftUpdateInputSchema)
+      .mutation(async ({ ctx, input }) => {
+        const organizationId = ctx.organization.organizationId;
+        return ctx.prisma.$transaction(async (tx) => {
+          const current = await tx.lease.findFirst({
+            where: { id: input.leaseId, organizationId, status: LeaseStatus.draft, archivedAt: null },
+            select: {
+              id: true,
+              propertyId: true,
+              unitId: true,
+              termType: true,
+              startsOn: true,
+              endsOn: true,
+              monthlyRentCents: true,
+              securityDepositCents: true,
+              rentDueDay: true,
+              continueMonthToMonthAfterEnd: true,
+              billingResponsibility: true,
+              allowPartialPayments: true,
+              draftStep: true,
+              revision: true,
+              tenants: { select: { tenantId: true, rentShareCents: true, depositShareCents: true } },
+            },
+          });
+
+          if (!current) throw new TRPCError({ code: "NOT_FOUND", message: "Lease draft not found." });
+          if (current.revision !== input.expectedRevision) {
+            throw new TRPCError({ code: "CONFLICT", message: "Lease draft has changed. Reload and try again." });
+          }
+
+          const data = input.data;
+          const propertyChanged = data.propertyId !== undefined && data.propertyId !== current.propertyId;
+          const effective = {
+            propertyId: data.propertyId === undefined ? current.propertyId : data.propertyId,
+            unitId:
+              data.unitId === undefined && propertyChanged
+                ? null
+                : data.unitId === undefined
+                  ? current.unitId
+                  : data.unitId,
+            termType: data.termType === undefined ? current.termType : data.termType,
+            startsOn: data.startsOn === undefined ? current.startsOn : data.startsOn,
+            endsOn: data.endsOn === undefined ? current.endsOn : data.endsOn,
+            monthlyRentCents: data.monthlyRentCents === undefined ? current.monthlyRentCents : data.monthlyRentCents,
+            securityDepositCents:
+              data.securityDepositCents === undefined ? current.securityDepositCents : data.securityDepositCents,
+            rentDueDay: data.rentDueDay === undefined ? current.rentDueDay : data.rentDueDay,
+            continueMonthToMonthAfterEnd:
+              data.continueMonthToMonthAfterEnd === undefined
+                ? current.continueMonthToMonthAfterEnd
+                : data.continueMonthToMonthAfterEnd,
+            billingResponsibility:
+              data.billingResponsibility === undefined ? current.billingResponsibility : data.billingResponsibility,
+            allowPartialPayments:
+              data.allowPartialPayments === undefined ? current.allowPartialPayments : data.allowPartialPayments,
+            draftStep: data.draftStep === undefined ? current.draftStep : data.draftStep,
+            tenantIds: data.tenantIds === undefined ? current.tenants.map(({ tenantId }) => tenantId) : data.tenantIds,
+            tenantAllocations: data.tenantAllocations,
+          };
+          const parsed = leaseDraftDataSchema.safeParse(effective);
+          if (!parsed.success) throw new TRPCError({ code: "BAD_REQUEST", message: parsed.error.issues[0]?.message });
+
+          if (parsed.data.propertyId !== null) {
+            await tx.property.findFirstOrThrow({ where: { id: parsed.data.propertyId, organizationId } });
+          }
+          if (parsed.data.unitId !== null) {
+            await tx.unit.findFirstOrThrow({
+              where: { id: parsed.data.unitId, propertyId: parsed.data.propertyId! },
+            });
+          }
+
+          if (data.tenantIds !== undefined) {
+            const tenants = await tx.tenant.findMany({
+              where: { id: { in: data.tenantIds }, organizationId },
+              select: { id: true },
+            });
+            if (tenants.length !== data.tenantIds.length) {
+              throw new TRPCError({ code: "NOT_FOUND", message: "One or more residents not found." });
+            }
+          }
+
+          if (data.tenantAllocations !== undefined) {
+            const tenantIds = new Set(parsed.data.tenantIds ?? []);
+            const allocationIds = new Set(data.tenantAllocations.map(({ tenantId }) => tenantId));
+            if (
+              tenantIds.size !== allocationIds.size ||
+              [...allocationIds].some((tenantId) => !tenantIds.has(tenantId))
+            ) {
+              throw new TRPCError({
+                code: "BAD_REQUEST",
+                message: "Allocations must match the selected residents.",
+              });
+            }
+          }
+
+          const updateData: Prisma.LeaseUncheckedUpdateManyInput = {
+            propertyId: parsed.data.propertyId ?? null,
+            unitId: parsed.data.unitId ?? null,
+            termType: parsed.data.termType ?? null,
+            startsOn: parsed.data.startsOn ?? null,
+            endsOn: parsed.data.endsOn ?? null,
+            monthlyRentCents: parsed.data.monthlyRentCents ?? null,
+            securityDepositCents: parsed.data.securityDepositCents ?? 0,
+            rentDueDay: parsed.data.rentDueDay ?? 1,
+            continueMonthToMonthAfterEnd: parsed.data.continueMonthToMonthAfterEnd ?? false,
+            billingResponsibility: parsed.data.billingResponsibility ?? null,
+            allowPartialPayments: parsed.data.allowPartialPayments ?? true,
+            draftStep: parsed.data.draftStep ?? "property",
+            revision: { increment: 1 },
+          };
+          const updated = await tx.lease.updateMany({
+            where: {
+              id: input.leaseId,
+              organizationId,
+              status: LeaseStatus.draft,
+              archivedAt: null,
+              revision: input.expectedRevision,
+            },
+            data: updateData,
+          });
+          if (updated.count !== 1)
+            throw new TRPCError({ code: "CONFLICT", message: "Lease draft has changed. Reload and try again." });
+
+          if (data.tenantIds !== undefined || data.tenantAllocations !== undefined) {
+            await tx.leaseTenant.deleteMany({ where: { organizationId, leaseId: input.leaseId } });
+            const tenantIds = data.tenantIds ?? current.tenants.map(({ tenantId }) => tenantId);
+            const allocations =
+              data.tenantAllocations ??
+              current.tenants.map(({ tenantId, rentShareCents, depositShareCents }) => ({
+                tenantId,
+                rentShareCents: rentShareCents ?? 0,
+                depositShareCents: depositShareCents ?? 0,
+              }));
+            if (tenantIds.length > 0) {
+              await tx.leaseTenant.createMany({
+                data: tenantIds.map((tenantId) => {
+                  const allocation = allocations.find((item) => item.tenantId === tenantId);
+                  return {
+                    organizationId,
+                    leaseId: input.leaseId,
+                    tenantId,
+                    rentShareCents: allocation?.rentShareCents ?? null,
+                    depositShareCents: allocation?.depositShareCents ?? null,
+                  };
+                }),
+              });
+            }
+          }
+          return tx.lease.findFirstOrThrow({ where: { id: input.leaseId, organizationId } });
+        });
       }),
     /** Archives a lease without changing its contractual status. */
     archive: permissionProcedure("leases", "archive")
