@@ -78,6 +78,7 @@ import {
   formatInvoiceNumber,
   formatMaintenanceTicketNumber,
 } from "@parcelis/schemas";
+import { sendVerificationEmail } from "@parcelis/email";
 import {
   ActivitySubjectType,
   LeaseStatus,
@@ -109,7 +110,13 @@ import {
 } from "../modules/object-storage.config";
 import { authRouter } from "./auth.router";
 import { requireAdministrator, requireOrganizationAdministrator } from "../modules/authorization";
-import { hashPassword } from "../modules/auth";
+import {
+  createEmailVerificationToken,
+  getEmailVerificationTokenExpiration,
+  getEmailVerificationUrl,
+  hashEmailVerificationToken,
+  hashPassword,
+} from "../modules/auth";
 import { getRolePermissions, requireNotePermission, requirePermission } from "../modules/permissions";
 import { organizationProcedure, organizationProcedure as publicProcedure, router } from "./trpc";
 import { renderInvoicePdf } from "../modules/invoice-pdf";
@@ -119,6 +126,7 @@ import {
   getOrganizationEmailConfig,
   isEmailSettingsEncryptionConfigured,
 } from "../modules/email-settings";
+import { consumeEmailSendRateLimit, getEmailSendRateLimitKey } from "../modules/login-rate-limit";
 
 const propertySelect = {
   id: true,
@@ -837,9 +845,11 @@ export const appRouter = router({
         if (input.role === "administrator" && ctx.user.role !== "administrator") {
           throw new TRPCError({ code: "FORBIDDEN", message: "Only administrators can create administrator accounts." });
         }
+        consumeEmailSendRateLimit(getEmailSendRateLimitKey(ctx.req.ip));
+        const verificationToken = createEmailVerificationToken();
         try {
           const passwordHash = await hashPassword(input.password);
-          return await ctx.prisma.$transaction(async (tx) => {
+          const user = await ctx.prisma.$transaction(async (tx) => {
             const user = await tx.user.create({
               data: {
                 name: input.name,
@@ -848,14 +858,36 @@ export const appRouter = router({
                 passwordHash,
                 role: input.role,
                 defaultOrganizationId: ctx.organization.organizationId,
+                accountStatus: "pending",
               },
               select: { id: true, name: true, email: true, phone: true, role: true, accountStatus: true },
             });
             await tx.organizationMembership.create({
               data: { userId: user.id, organizationId: ctx.organization.organizationId },
             });
+            await tx.emailVerificationToken.create({
+              data: {
+                userId: user.id,
+                tokenHash: hashEmailVerificationToken(verificationToken),
+                expiresAt: getEmailVerificationTokenExpiration(),
+              },
+            });
             return user;
           });
+          try {
+            await sendVerificationEmail({
+              to: user.email,
+              verificationUrl: getEmailVerificationUrl(verificationToken),
+              emailConfig: await getOrganizationEmailConfig(ctx.prisma, ctx.organization.organizationId),
+            });
+          } catch (error) {
+            console.error("Unable to send email verification email.", error);
+            throw new TRPCError({
+              code: "SERVICE_UNAVAILABLE",
+              message: "The account was created, but we could not send a verification email. Please resend it.",
+            });
+          }
+          return user;
         } catch (error) {
           if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
             throw new TRPCError({ code: "CONFLICT", message: "An account already uses this email address." });
@@ -897,15 +929,33 @@ export const appRouter = router({
         });
       }
       try {
-        return await ctx.prisma.user.update({
-          where: { id: input.id },
-          data: {
-            name: input.name,
-            ...(input.email === undefined ? {} : { email: input.email }),
-            phone: input.phone || null,
+        return await ctx.prisma.$transaction(
+          async (tx) => {
+            if (input.email !== undefined) {
+              const existingUser = await tx.user.findUnique({
+                where: { id: input.id },
+                select: { accountStatus: true, email: true },
+              });
+              if (!existingUser) throw new TRPCError({ code: "NOT_FOUND", message: "User not found." });
+              if (existingUser.accountStatus === "pending" && existingUser.email !== input.email) {
+                throw new TRPCError({
+                  code: "BAD_REQUEST",
+                  message: "A pending user's email address cannot be changed before verification.",
+                });
+              }
+            }
+            return tx.user.update({
+              where: { id: input.id },
+              data: {
+                name: input.name,
+                ...(input.email === undefined ? {} : { email: input.email }),
+                phone: input.phone || null,
+              },
+              select: { id: true, name: true, email: true, phone: true, role: true, accountStatus: true },
+            });
           },
-          select: { id: true, name: true, email: true, phone: true, role: true, accountStatus: true },
-        });
+          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        );
       } catch (error) {
         if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
           throw new TRPCError({ code: "CONFLICT", message: "An account already uses this email address." });
@@ -986,6 +1036,17 @@ export const appRouter = router({
         try {
           return await ctx.prisma.$transaction(
             async (tx) => {
+              const existingUser = await tx.user.findUnique({
+                where: { id: input.id },
+                select: { accountStatus: true, email: true },
+              });
+              if (!existingUser) throw new TRPCError({ code: "NOT_FOUND", message: "User not found." });
+              if (existingUser.accountStatus === "pending" && existingUser.email !== input.email) {
+                throw new TRPCError({
+                  code: "BAD_REQUEST",
+                  message: "A pending user's email address cannot be changed before verification.",
+                });
+              }
               if (input.role !== "administrator") await assertActiveAdministratorCanBeRemoved(tx, input.id);
               return tx.user.update({
                 where: { id: input.id },
@@ -1019,6 +1080,16 @@ export const appRouter = router({
             },
             { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
           );
+        }
+        const user = await ctx.prisma.user.findUniqueOrThrow({
+          where: { id: input.id },
+          select: { accountStatus: true },
+        });
+        if (user.accountStatus === "pending") {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Pending accounts must be activated through email verification.",
+          });
         }
         return ctx.prisma.user.update({
           where: { id: input.id },

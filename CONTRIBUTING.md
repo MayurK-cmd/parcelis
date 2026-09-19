@@ -94,24 +94,27 @@ pnpm dev
 
 Use nginx as the normal local entry point:
 
-| Service | URL |
-| --- | --- |
-| Web app | `http://localhost` |
-| Documentation | `http://localhost/docs/` |
-| API | `http://localhost/api/v1` |
+| Service              | URL                                                                                                      |
+| -------------------- | -------------------------------------------------------------------------------------------------------- |
+| Web app              | `http://localhost`                                                                                       |
+| Documentation        | `http://localhost/docs/`                                                                                 |
+| API                  | `http://localhost/api/v1`                                                                                |
+| React Email previews | `http://templates.localhost/` by default; use `http://templates.localhost:<PROXY_PORT>/` when configured |
+
+If `templates.localhost` does not resolve on your system, add `127.0.0.1 templates.localhost` to `/etc/hosts`.
 
 The host processes and local services are also available directly:
 
-| Service | Address |
-| --- | --- |
-| Web app | `http://localhost:30000` |
-| Docs | `http://localhost:40000` |
-| API | `http://localhost:40010` |
+| Service       | Address                  |
+| ------------- | ------------------------ |
+| Web app       | `http://localhost:30000` |
+| Docs          | `http://localhost:40000` |
+| API           | `http://localhost:40010` |
 | Email preview | `http://localhost:30001` |
-| PostgreSQL | `localhost:54320` |
-| pgAdmin | `http://localhost:8000` |
-| MinIO API | `http://localhost:9001` |
-| MinIO console | `http://localhost:9010` |
+| PostgreSQL    | `localhost:54320`        |
+| pgAdmin       | `http://localhost:8000`  |
+| MinIO API     | `http://localhost:9001`  |
+| MinIO console | `http://localhost:9010`  |
 
 #### Local database
 
@@ -179,7 +182,7 @@ cp .env.example .env
 docker compose -f docker-compose-dev.yml up -d
 ```
 
-The development stack provides the nginx proxy and local dependencies. `pnpm dev` starts nginx, PostgreSQL, MinIO, and MinIO initialization before starting the host-based web, API, and docs processes. Keep the compose stack running while you work, then stop it when you are done. Set `PROXY_PORT` when port 80 is already in use.
+The development stack provides the nginx proxy and local dependencies. `pnpm dev` starts nginx, PostgreSQL, MinIO, and MinIO initialization before starting the host-based web, API, docs, and React Email preview processes. Keep the compose stack running while you work, then stop it when you are done. Set `PROXY_PORT` when port 80 is already in use.
 
 #### Production-style deployment
 
@@ -209,11 +212,11 @@ docker compose --env-file .env.production logs -f
 
 Parcelis uses MinIO for local image storage. Docker Compose starts the service and the one-time `minio-init` job, which exits after preparing the buckets.
 
-| Service or bucket | Address or purpose |
-| --- | --- |
-| MinIO API | `http://localhost:9001` |
-| MinIO console | `http://localhost:9010` |
-| `parcelis-images` | Private property and tenant images |
+| Service or bucket | Address or purpose                                                                      |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| MinIO API         | `http://localhost:9001`                                                                 |
+| MinIO console     | `http://localhost:9010`                                                                 |
+| `parcelis-images` | Private property and tenant images                                                      |
 | `parcelis-assets` | Public brand assets, including `brand/parcelis-light.png` and `brand/parcelis-dark.png` |
 
 MinIO CORS uses the server-level `MINIO_API_CORS_ALLOW_ORIGIN` setting. Development allows

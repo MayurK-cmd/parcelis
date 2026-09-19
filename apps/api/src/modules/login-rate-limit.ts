@@ -46,8 +46,21 @@ export function consumePasswordResetRateLimit(key: string) {
   consumeLoginRateLimit(key);
 }
 
+export function consumeEmailVerificationRateLimit(key: string) {
+  consumeLoginRateLimit(key);
+}
+
+export function consumeEmailSendRateLimit(key: string) {
+  consumeLoginRateLimit(key);
+}
+
 export function clearLoginRateLimit(key: string) {
   attempts.delete(key);
+}
+
+export function resetRateLimits() {
+  attempts.clear();
+  lastSweepAt = 0;
 }
 
 export function getLoginRateLimitKey(ip: string | undefined, email: string) {
@@ -62,6 +75,15 @@ export function getPasswordChangeRateLimitKey(ip: string | undefined, userId: nu
 export function getPasswordResetRateLimitKey(ip: string | undefined, email: string) {
   const normalizedEmail = email.trim().toLowerCase();
   return getRateLimitKey(ip, `password-reset:${normalizedEmail}`);
+}
+
+export function getEmailVerificationRateLimitKey(ip: string | undefined, email: string) {
+  const normalizedEmail = email.trim().toLowerCase();
+  return getRateLimitKey(ip, `email-verification:${normalizedEmail}`);
+}
+
+export function getEmailSendRateLimitKey(ip: string | undefined) {
+  return getRateLimitKey(ip, "email-send");
 }
 
 function getRateLimitKey(ip: string | undefined, identifier: string) {

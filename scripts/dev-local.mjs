@@ -62,12 +62,17 @@ async function stopListener(port) {
 
 await Promise.all([requestedAppPort, requestedDocsPort, requestedApiPort, requestedEmailPreviewPort].map(stopListener));
 
-const apiPort = await findOpenPort(requestedApiPort);
-const appPort = await findOpenPort(requestedAppPort);
-const docsPort = await findOpenPort(requestedDocsPort);
-const emailPreviewPort = await findOpenPort(requestedEmailPreviewPort);
+const reservedPorts = new Set();
+const apiPort = await findOpenPort(requestedApiPort, reservedPorts);
+reservedPorts.add(apiPort);
+const appPort = await findOpenPort(requestedAppPort, reservedPorts);
+reservedPorts.add(appPort);
+const docsPort = await findOpenPort(requestedDocsPort, reservedPorts);
+reservedPorts.add(docsPort);
+const emailPreviewPort = await findOpenPort(requestedEmailPreviewPort, reservedPorts);
 const proxyPort = process.env.PROXY_PORT ?? 80;
-const proxyOrigin = Number(proxyPort) === 80 ? "http://localhost" : `http://localhost:${proxyPort}`;
+const proxyPortSuffix = Number(proxyPort) === 80 ? "" : `:${proxyPort}`;
+const proxyOrigin = `http://localhost${proxyPortSuffix}`;
 const postgresPort = process.env.POSTGRES_PORT ?? 54320;
 const minioPort = process.env.MINIO_API_PORT ?? 9001;
 const databaseUrl =
@@ -100,6 +105,7 @@ function runCompose(args) {
       API_PORT: String(apiPort),
       DOCS_PORT: String(docsPort),
       APP_PORT: String(appPort),
+      EMAIL_PREVIEW_PORT: String(emailPreviewPort),
     },
     stdio: "inherit",
   });
@@ -108,7 +114,7 @@ function runCompose(args) {
 function startDevelopmentServices() {
   try {
     console.log("[parcelis] Ensuring local services are running");
-    runCompose(["up", "-d", "proxy-service"]);
+    runCompose(["up", "-d", "--force-recreate", "proxy-service"]);
     runCompose(["up", "-d", "--wait", "postgres-service"]);
     runCompose(["up", "-d", "minio-service"]);
     runCompose(["run", "--rm", "minio-init-service"]);

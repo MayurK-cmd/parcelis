@@ -5,6 +5,7 @@ import type { Request, Response } from "express";
 const sessionCookieName = "parcelis_session";
 const sessionDurationMs = 1000 * 60 * 60 * 24 * 7;
 const passwordResetTokenDurationMs = 1000 * 60 * 30;
+const emailVerificationTokenDurationMs = 1000 * 60 * 60 * 24;
 
 export function isAuthenticationDisabled() {
   return process.env.AUTH_DISABLED === "true" && ["development", "test"].includes(process.env.NODE_ENV ?? "");
@@ -42,12 +43,14 @@ export function createSessionToken() {
 }
 
 export const createPasswordResetToken = createSessionToken;
+export const createEmailVerificationToken = createSessionToken;
 
 export function hashSessionToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
 export const hashPasswordResetToken = hashSessionToken;
+export const hashEmailVerificationToken = hashSessionToken;
 
 export function getSessionToken(request: Request) {
   const cookies = request.headers.cookie?.split(";") ?? [];
@@ -73,4 +76,20 @@ export function getSessionExpiration() {
 
 export function getPasswordResetTokenExpiration() {
   return new Date(Date.now() + passwordResetTokenDurationMs);
+}
+
+export function getEmailVerificationTokenExpiration() {
+  return new Date(Date.now() + emailVerificationTokenDurationMs);
+}
+
+export function getLoginTokenUrl(mode: "reset" | "verify", token: string) {
+  const webOrigin = process.env.WEB_ORIGIN ?? `http://localhost:${process.env.APP_PORT ?? 30000}`;
+  const url = new URL("/login", webOrigin);
+  url.searchParams.set("mode", mode);
+  url.hash = new URLSearchParams({ token }).toString();
+  return url.toString();
+}
+
+export function getEmailVerificationUrl(token: string) {
+  return getLoginTokenUrl("verify", token);
 }

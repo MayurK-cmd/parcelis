@@ -33,6 +33,10 @@ export const requestPasswordResetInputSchema = z.object({
     .max(254)
     .transform((email) => email.toLowerCase()),
 });
+export const requestEmailVerificationInputSchema = requestPasswordResetInputSchema;
+export const verifyEmailInputSchema = z.object({
+  token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+});
 export const resetPasswordInputSchema = z
   .object({
     token: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
@@ -64,7 +68,7 @@ export const userRoleValues = [
 ] as const;
 export const userRoleSchema = z.enum(userRoleValues);
 export type UserRole = z.infer<typeof userRoleSchema>;
-export const userAccountStatusSchema = z.enum(["active", "disabled"]);
+export const userAccountStatusSchema = z.enum(["pending", "active", "disabled"]);
 export const primaryPermissionResourceValues = [
   "users",
   "properties",
@@ -231,7 +235,7 @@ export const userProfileImageUploadCompleteInputSchema = z
   .strict();
 export const userAccountStatusInputSchema = z.object({
   id: idSchema,
-  accountStatus: userAccountStatusSchema,
+  accountStatus: z.enum(["active", "disabled"]),
 });
 export const deleteUserInputSchema = z.object({ id: idSchema });
 export const roleResourcePermissionSchema = z

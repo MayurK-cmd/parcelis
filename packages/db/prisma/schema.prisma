@@ -100,6 +100,7 @@ enum UserRole {
 }
 
 enum UserAccountStatus {
+  pending
   active
   disabled
 }
@@ -207,6 +208,7 @@ model User {
   updatedAt               DateTime                 @updatedAt
   sessions                Session[]
   passwordResetTokens     PasswordResetToken[]
+  emailVerificationTokens EmailVerificationToken[]
   organizationMemberships OrganizationMembership[]
   defaultOrganization     Organization?            @relation("UserDefaultOrganization", fields: [defaultOrganizationId], references: [id], onDelete: SetNull)
 
@@ -251,6 +253,19 @@ model PasswordResetToken {
   usedAt    DateTime?
   createdAt DateTime  @default(now())
   user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model EmailVerificationToken {
+  id        Int      @id @default(autoincrement())
+  userId    Int
+  tokenHash String   @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
   @@index([expiresAt])
