@@ -182,17 +182,57 @@ test("preserves allocations when only resident IDs are patched", async () => {
   ]);
 });
 
-test("rejects allocation IDs that do not match selected residents", async () => {
-  let deleted = false;
-  const current = draft();
+for (const billingResponsibility of [null, "individual"] as const) {
+  test(`rejects allocation IDs that do not match selected residents when billing is ${billingResponsibility ?? "unset"}`, async () => {
+    let deleted = false;
+    const current = draft({ billingResponsibility });
+    const tx = {
+      lease: { findFirst: async () => current },
+      property: { findFirstOrThrow: async () => ({ id: 2 }) },
+      unit: { findFirstOrThrow: async () => ({ id: 3 }) },
+      tenant: { findMany: async () => [{ id: 11 }] },
+      leaseTenant: {
+        deleteMany: async () => {
+          deleted = true;
+          return { count: 1 };
+        },
+      },
+    };
+    const caller = createCaller({
+      $transaction: async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx),
+    });
+
+    await assert.rejects(
+      caller.leases.updateDraft({
+        leaseId: 9,
+        expectedRevision: 0,
+        data: { tenantIds: [11], tenantAllocations: [{ tenantId: 12, rentShareCents: 1, depositShareCents: 1 }] },
+      }),
+      { code: "BAD_REQUEST" },
+    );
+    assert.equal(deleted, false);
+  });
+}
+
+test("accepts joint billing without individual allocations", async () => {
+  let createdRows: unknown;
+  const current = draft({
+    billingResponsibility: "joint",
+    tenants: [{ tenantId: 11, rentShareCents: 4000, depositShareCents: 1000 }],
+  });
   const tx = {
-    lease: { findFirst: async () => current },
+    lease: {
+      findFirst: async () => current,
+      updateMany: async () => ({ count: 1 }),
+      findFirstOrThrow: async () => ({ ...current, revision: 1 }),
+    },
     property: { findFirstOrThrow: async () => ({ id: 2 }) },
     unit: { findFirstOrThrow: async () => ({ id: 3 }) },
     tenant: { findMany: async () => [{ id: 11 }] },
     leaseTenant: {
-      deleteMany: async () => {
-        deleted = true;
+      deleteMany: async () => ({ count: 1 }),
+      createMany: async ({ data }: { data: unknown }) => {
+        createdRows = data;
         return { count: 1 };
       },
     },
@@ -201,13 +241,13 @@ test("rejects allocation IDs that do not match selected residents", async () => 
     $transaction: async (callback: (client: typeof tx) => Promise<unknown>) => callback(tx),
   });
 
-  await assert.rejects(
-    caller.leases.updateDraft({
-      leaseId: 9,
-      expectedRevision: 0,
-      data: { tenantIds: [11], tenantAllocations: [{ tenantId: 12, rentShareCents: 1, depositShareCents: 1 }] },
-    }),
-    { code: "BAD_REQUEST" },
-  );
-  assert.equal(deleted, false);
+  await caller.leases.updateDraft({
+    leaseId: 9,
+    expectedRevision: 0,
+    data: { tenantIds: [11], billingResponsibility: "joint", tenantAllocations: [] },
+  });
+
+  assert.deepEqual(createdRows, [
+    { organizationId: 7, leaseId: 9, tenantId: 11, rentShareCents: null, depositShareCents: null },
+  ]);
 });
