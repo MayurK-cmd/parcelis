@@ -11,6 +11,7 @@ import {
   CalendarDays,
   CalendarRange,
   Check,
+  ChevronDown,
   ChevronRight,
   DoorOpen,
   FileText,
@@ -25,6 +26,12 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Alert,
   AlertDescription,
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogDescription,
+  AlertDialogFooter,
   AlertTitle,
   Button,
   Calendar,
@@ -32,6 +39,11 @@ import {
   CardContent,
   CardHeader,
   Checkbox,
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
   Input,
   Popover,
   PopoverContent,
@@ -58,6 +70,7 @@ import {
 } from "@parcelis/schemas";
 import { apiClient, queryKeys } from "../../../../components/api-client";
 import { LeaseCreationStepper, leaseCreationSteps } from "../../../../components/lease-creation-stepper";
+import { hasPermission } from "../../../../components/property-access";
 import { LoadingState } from "../../../../components/loading-state";
 import {
   initialPropertyFormState,
@@ -112,10 +125,6 @@ const initialLeaseDraft: LeaseDraft = {
   allowPartialPayments: true,
   tenantAllocations: [],
 };
-
-function getLeaseDraftStorageKey(organizationId: number) {
-  return `parcelis:lease-server-draft:${organizationId}`;
-}
 
 function formatCurrency(cents: number) {
   return new Intl.NumberFormat("en-US", {
@@ -253,13 +262,11 @@ function synchronizeTenantAllocations(tenantIds: number[], allocations: LeaseDra
 }
 
 function PropertySelector({
-  onAddProperty,
   onValueChange,
   error,
   value,
 }: {
   error: string | null;
-  onAddProperty: () => void;
   onValueChange: (selection: { propertyId: number; unitId: number; monthlyRentCents: number }) => void;
   value: number | null;
 }) {
@@ -297,7 +304,7 @@ function PropertySelector({
   return (
     <div className="w-full text-left">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-parcelis-border px-5 py-4">
-        <div className="flex items-center gap-2">
+        <div className="hidden items-center gap-2 md:flex">
           <ToggleGroup
             aria-label="Property availability"
             onValueChange={(nextValue) => setAvailabilityFilter(nextValue as "available" | "all")}
@@ -310,10 +317,39 @@ function PropertySelector({
             {groupByProperty ? "Grouped By Property" : "Not Grouped"}
           </Button>
         </div>
-        <Button onClick={onAddProperty} type="button">
-          <Plus className="h-4 w-4" />
-          Add Property
-        </Button>
+        <div className="flex w-full md:hidden">
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button className="w-full justify-between" type="button" variant="secondary">
+                View options
+                <ChevronDown className="h-4 w-4" />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="min-w-56">
+              <p className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-parcelis-gray">
+                Availability
+              </p>
+              <DropdownMenuItem onSelect={() => setAvailabilityFilter("available")}>
+                <Check className={`h-4 w-4 ${availabilityFilter === "available" ? "opacity-100" : "opacity-0"}`} />
+                Available
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setAvailabilityFilter("all")}>
+                <Check className={`h-4 w-4 ${availabilityFilter === "all" ? "opacity-100" : "opacity-0"}`} />
+                All properties
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <p className="px-3 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-parcelis-gray">View</p>
+              <DropdownMenuItem onSelect={() => setGroupByProperty(true)}>
+                <Check className={`h-4 w-4 ${groupByProperty ? "opacity-100" : "opacity-0"}`} />
+                Grouped by property
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={() => setGroupByProperty(false)}>
+                <Check className={`h-4 w-4 ${!groupByProperty ? "opacity-100" : "opacity-0"}`} />
+                List view
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
       {error ? (
         <Alert className="rounded-none border-x-0" variant="destructive">
@@ -555,7 +591,6 @@ function ResidentsSelector({
   allowPartialPayments,
   billingResponsibility,
   error,
-  onAddTenant,
   onAllowPartialPaymentsChange,
   onBillingResponsibilityChange,
   onMonthlyRentCentsChange,
@@ -570,7 +605,6 @@ function ResidentsSelector({
   allowPartialPayments: boolean;
   billingResponsibility: LeaseDraft["billingResponsibility"];
   error?: string | null;
-  onAddTenant: () => void;
   onAllowPartialPaymentsChange: (allowPartialPayments: boolean) => void;
   onBillingResponsibilityChange: (billingResponsibility: LeaseDraft["billingResponsibility"]) => void;
   onMonthlyRentCentsChange: (monthlyRentCents: number | null) => void;
@@ -583,6 +617,8 @@ function ResidentsSelector({
   value: number[];
 }) {
   const [search, setSearch] = React.useState("");
+  const [isSearchOpen, setIsSearchOpen] = React.useState(false);
+  const searchInputRef = React.useRef<HTMLInputElement>(null);
   const [availabilityFilter, setAvailabilityFilter] = React.useState<"available" | "all">("available");
   const [rentAllocationMode, setRentAllocationMode] = React.useState<"percentage" | "amount">("percentage");
   const [depositAllocationMode, setDepositAllocationMode] = React.useState<"percentage" | "amount">("percentage");
@@ -603,6 +639,10 @@ function ResidentsSelector({
   React.useEffect(() => {
     setSecurityDepositInput(formatCurrencyInput(securityDepositCents));
   }, [securityDepositCents]);
+
+  React.useEffect(() => {
+    if (isSearchOpen) searchInputRef.current?.focus();
+  }, [isSearchOpen]);
 
   const tenants = (tenantsQuery.data ?? []).filter((tenant) => tenant.tenantStatus !== "archived");
   const query = search.trim().toLowerCase();
@@ -683,7 +723,7 @@ function ResidentsSelector({
   return (
     <div className="w-full text-left">
       <div className="flex flex-wrap items-center justify-between gap-3 border-b border-parcelis-border px-5 py-4">
-        <div className="flex flex-wrap items-center gap-2">
+        <div className="flex w-full flex-wrap items-center justify-between gap-2 md:w-auto md:justify-start">
           <ToggleGroup
             aria-label="Tenant availability"
             onValueChange={(nextValue) => setAvailabilityFilter(nextValue as "available" | "all")}
@@ -692,13 +732,26 @@ function ResidentsSelector({
             <ToggleGroupItem value="available">Available</ToggleGroupItem>
             <ToggleGroupItem value="all">All Tenants</ToggleGroupItem>
           </ToggleGroup>
-          <label className="flex h-10 items-center gap-2 rounded-md border border-parcelis-border bg-white px-3 text-sm text-parcelis-gray md:min-w-80">
+          <Button
+            aria-expanded={isSearchOpen}
+            aria-label="Search tenants"
+            className="h-10 w-10 px-0 md:hidden"
+            onClick={() => setIsSearchOpen((open) => !open)}
+            type="button"
+            variant="secondary"
+          >
+            <Search className="h-4 w-4" />
+          </Button>
+          <label
+            className={`${isSearchOpen ? "flex w-full" : "hidden"} h-10 items-center gap-2 rounded-md border border-parcelis-border bg-white px-3 text-sm text-parcelis-gray md:flex md:min-w-80`}
+          >
             <Search className="h-4 w-4" />
             <Input
               aria-label="Search tenants"
               className="h-auto min-w-0 flex-1 border-0 bg-transparent p-0 focus:border-transparent"
               onChange={(event) => setSearch(event.target.value)}
               placeholder="Search tenants"
+              ref={searchInputRef}
               value={search}
             />
           </label>
@@ -707,10 +760,6 @@ function ResidentsSelector({
           <span className="text-sm font-semibold text-parcelis-charcoal">
             {value.length} {value.length === 1 ? "resident" : "residents"} selected
           </span>
-          <Button onClick={onAddTenant} type="button">
-            <Plus className="h-4 w-4" />
-            Add Tenant
-          </Button>
         </div>
       </div>
       {error && value.length === 0 ? (
@@ -991,14 +1040,16 @@ function ResidentsSelector({
                           </TableRow>
                         );
                       })}
-                      <TableRow className="bg-parcelis-porcelain/60">
-                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal">Total</TableCell>
-                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal">
+                      <TableRow className="bg-parcelis-porcelain/60 dark:bg-parcelis-charcoal/55">
+                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal dark:text-white">
+                          Total
+                        </TableCell>
+                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal dark:text-white">
                           {rentAllocationMode === "percentage"
                             ? `${formatPercentage(allocatedRentCents, monthlyRentCents)}%`
                             : formatCurrency(allocatedRentCents)}
                         </TableCell>
-                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal">
+                        <TableCell className="px-4 py-3 font-semibold text-parcelis-charcoal dark:text-white">
                           {depositAllocationMode === "percentage"
                             ? `${formatPercentage(allocatedDepositCents, securityDepositCents)}%`
                             : formatCurrency(allocatedDepositCents)}
@@ -1543,20 +1594,18 @@ function NewLeasePageContent() {
   });
   const draftRevisionRef = React.useRef(0);
   const draftSaveQueueRef = React.useRef<Promise<unknown>>(Promise.resolve());
-  const activeOrganizationQuery = useQuery({
-    queryKey: [...queryKeys.organizations.active, pathname],
-    queryFn: () => apiClient.organizations.active.query(),
-  });
-  const leaseDraftStorageKey = activeOrganizationQuery.data
-    ? getLeaseDraftStorageKey(activeOrganizationQuery.data.id)
-    : null;
-  const [identityStorageLoaded, setIdentityStorageLoaded] = React.useState(false);
+  const currentUserQuery = useQuery({ queryKey: queryKeys.auth.me, queryFn: () => apiClient.auth.me.query() });
+  const [isSelectingUnit, setIsSelectingUnit] = React.useState(false);
+  const [existingUnitDraft, setExistingUnitDraft] = React.useState<{
+    lease: Awaited<ReturnType<typeof apiClient.leases.createDraft.mutate>>;
+    selection: { propertyId: number; unitId: number; monthlyRentCents?: number };
+  } | null>(null);
   // Track the loaded draft key to prevent reloading the same draft multiple times.
   const [loadedDraftKey, setLoadedDraftKey] = React.useState<string | null>(null);
   const leaseDraftQuery = useQuery({
     queryKey: ["lease-draft", draftIdentity.leaseDraftKey],
     queryFn: () => apiClient.leases.draftByKey.query({ leaseDraftKey: draftIdentity.leaseDraftKey }),
-    enabled: Boolean(draftIdentity.leaseDraftKey),
+    enabled: Boolean(draftKeyFromUrl && draftIdentity.leaseDraftKey === draftKeyFromUrl),
   });
   const [isPropertyDrawerOpen, setIsPropertyDrawerOpen] = React.useState(false);
   const [propertyForm, setPropertyForm] = React.useState<PropertyFormState>(initialPropertyFormState);
@@ -1605,9 +1654,29 @@ function NewLeasePageContent() {
   );
 
   const createLeaseDraft = useMutation({
-    mutationFn: (input: { leaseDraftKey: string; propertyId: number; unitId: number }) =>
-      apiClient.leases.createDraft.mutate(input),
-    onSuccess: async (lease) => {
+    mutationFn: (input: {
+      leaseDraftKey: string;
+      propertyId: number;
+      unitId: number;
+      monthlyRentCents?: number;
+      replaceDraft?: { id: number; expectedRevision: number };
+    }) => {
+      const { monthlyRentCents: _rent, ...data } = input;
+      return apiClient.leases.createDraft.mutate(data);
+    },
+    onSuccess: async (lease, input) => {
+      if (lease.leaseDraftKey !== input.leaseDraftKey) {
+        setExistingUnitDraft({ lease, selection: input });
+        return;
+      }
+      setExistingUnitDraft(null);
+      setDraft({
+        ...initialLeaseDraft,
+        propertyId: input.propertyId,
+        unitId: input.unitId,
+        monthlyRentCents: input.monthlyRentCents ?? null,
+      });
+      lastSavedDraftRef.current = null;
       draftRevisionRef.current = lease.revision;
       setDraftIdentity((current) => ({
         ...current,
@@ -1617,7 +1686,11 @@ function NewLeasePageContent() {
       }));
       router.replace(`${pathname}?draft=${encodeURIComponent(lease.leaseDraftKey)}`);
       setLoadedDraftKey(lease.leaseDraftKey);
-      await queryClient.invalidateQueries({ queryKey: ["lease-draft", lease.leaseDraftKey] });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["lease-draft", lease.leaseDraftKey] }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.leases.drafts }),
+        queryClient.invalidateQueries({ queryKey: queryKeys.properties.list }),
+      ]);
       setDraftSaveError(null);
       setStepError(null);
     },
@@ -1722,45 +1795,20 @@ function NewLeasePageContent() {
   const currentStepError = hasDraftConflict ? null : stepError;
 
   React.useEffect(() => {
-    if (!leaseDraftStorageKey) return;
-    try {
-      if (draftKeyFromUrl) {
-        setDraftIdentity((current) => ({ ...current, leaseDraftKey: draftKeyFromUrl }));
-        setIdentityStorageLoaded(true);
-        return;
-      }
-      const storedIdentity = window.sessionStorage.getItem(leaseDraftStorageKey);
-      if (storedIdentity) {
-        const parsed = JSON.parse(storedIdentity) as Partial<LeaseDraftIdentity>;
-        if (typeof parsed.leaseDraftKey === "string" && parsed.leaseDraftKey) {
-          setDraftIdentity({
-            leaseDraftKey: parsed.leaseDraftKey,
-            leaseId: typeof parsed.leaseId === "number" ? parsed.leaseId : null,
-            revision: typeof parsed.revision === "number" ? parsed.revision : 0,
-          });
-          draftRevisionRef.current = typeof parsed.revision === "number" ? parsed.revision : 0;
-        }
-      }
-    } catch {
-      setDraftIdentity({ leaseDraftKey: "", leaseId: null, revision: 0 });
+    setDraftIdentity((current) => {
+      if (draftKeyFromUrl && current.leaseDraftKey === draftKeyFromUrl) return current;
+      return { leaseDraftKey: draftKeyFromUrl || crypto.randomUUID(), leaseId: null, revision: 0 };
+    });
+    if (!draftKeyFromUrl) {
+      setDraft(initialLeaseDraft);
+      setLoadedDraftKey(null);
+      draftRevisionRef.current = 0;
+      lastSavedDraftRef.current = null;
+      setDraftSaveError(null);
+      setSaveStatus("idle");
+      setStepError(null);
     }
-    setIdentityStorageLoaded(true);
-  }, [draftKeyFromUrl, leaseDraftStorageKey]);
-
-  React.useEffect(() => {
-    if (!leaseDraftStorageKey || !draftIdentity.leaseDraftKey) return;
-    try {
-      window.sessionStorage.setItem(leaseDraftStorageKey, JSON.stringify(draftIdentity));
-    } catch {
-      // Storage can be unavailable in private browsing or restricted browser contexts.
-    }
-  }, [draftIdentity, leaseDraftStorageKey]);
-
-  React.useEffect(() => {
-    if (identityStorageLoaded && !draftIdentity.leaseDraftKey && typeof crypto !== "undefined") {
-      setDraftIdentity((current) => ({ ...current, leaseDraftKey: crypto.randomUUID() }));
-    }
-  }, [draftIdentity.leaseDraftKey, identityStorageLoaded]);
+  }, [draftKeyFromUrl]);
 
   React.useEffect(() => {
     const lease = leaseDraftQuery.data;
@@ -1795,10 +1843,21 @@ function NewLeasePageContent() {
   React.useEffect(() => {
     if (leaseDraftQuery.error) {
       setStepError(`Unable to load the lease draft: ${leaseDraftQuery.error.message}`);
-    } else if (leaseDraftQuery.isSuccess && leaseDraftQuery.data === null && draftIdentity.leaseId !== null) {
+    } else if (
+      draftKeyFromUrl &&
+      leaseDraftQuery.isSuccess &&
+      !leaseDraftQuery.isFetching &&
+      leaseDraftQuery.data === null
+    ) {
       setStepError("This lease draft is no longer available. Start a new lease draft.");
     }
-  }, [draftIdentity.leaseId, leaseDraftQuery.data, leaseDraftQuery.error, leaseDraftQuery.isSuccess]);
+  }, [
+    draftKeyFromUrl,
+    leaseDraftQuery.data,
+    leaseDraftQuery.error,
+    leaseDraftQuery.isFetching,
+    leaseDraftQuery.isSuccess,
+  ]);
 
   // Automatically saves the lease draft whenever it changes, with a debounce to avoid excessive requests.
   React.useEffect(() => {
@@ -1866,8 +1925,7 @@ function NewLeasePageContent() {
   }
 
   function preventUnsafeExit(event: React.MouseEvent<HTMLAnchorElement>) {
-    const hasUnsavedChanges =
-      draftIdentity.leaseId !== null && lastSavedDraftRef.current !== JSON.stringify(draft);
+    const hasUnsavedChanges = draftIdentity.leaseId !== null && lastSavedDraftRef.current !== JSON.stringify(draft);
     if (hasUnsavedChanges || updateLeaseDraft.isPending || saveStatus === "error") {
       event.preventDefault();
       setStepError("Save or retry the current changes before leaving the wizard.");
@@ -1936,6 +1994,7 @@ function NewLeasePageContent() {
           propertyId: draft.propertyId,
           unitId: draft.unitId,
         });
+        if (lease.leaseDraftKey !== draftIdentity.leaseDraftKey) return;
         leaseId = lease.id;
         draftRevisionRef.current = lease.revision;
         setDraftIdentity((current) => ({
@@ -2024,6 +2083,26 @@ function NewLeasePageContent() {
     if (!isLastStep) goNext();
   }
 
+  function discardExistingDraft() {
+    if (!existingUnitDraft) return;
+    createLeaseDraft.mutate({
+      ...existingUnitDraft.selection,
+      leaseDraftKey: crypto.randomUUID(),
+      replaceDraft: {
+        id: existingUnitDraft.lease.id,
+        expectedRevision: existingUnitDraft.lease.revision,
+      },
+    });
+  }
+
+  function resumeExistingDraft() {
+    if (!existingUnitDraft) return;
+    setLoadedDraftKey(null);
+    setStepError(null);
+    router.replace(`${pathname}?draft=${encodeURIComponent(existingUnitDraft.lease.leaseDraftKey)}`);
+    setExistingUnitDraft(null);
+  }
+
   return (
     <>
       <PropertyDrawer
@@ -2062,17 +2141,106 @@ function NewLeasePageContent() {
         submitLabel="Add Tenant"
       />
       <main className="flex flex-1 flex-col">
+        <AlertDialog
+          open={Boolean(existingUnitDraft)}
+          onOpenChange={(open) => {
+            if (!open && !createLeaseDraft.isPending) setExistingUnitDraft(null);
+          }}
+        >
+          <AlertDialogContent className="max-w-lg p-6">
+            <AlertDialogHeader className="gap-4 md:gap-2">
+              <AlertDialogTitle>An unfinished lease exists for this unit.</AlertDialogTitle>
+              <AlertDialogDescription>
+                Resume this draft, discard it to start over, or choose another unit.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            {createLeaseDraft.error ? (
+              <p role="alert" className="text-sm text-red-700">
+                {createLeaseDraft.error.message}
+              </p>
+            ) : null}
+            <AlertDialogFooter className="hidden gap-2 p-2 md:flex">
+              <Button
+                className="h-11 py-6"
+                variant="secondary"
+                disabled={createLeaseDraft.isPending}
+                onClick={() => setExistingUnitDraft(null)}
+              >
+                Choose another unit
+              </Button>
+              {hasPermission(currentUserQuery.data?.permissions, "leases", "delete") ? (
+                <Button
+                  className="h-11 py-6"
+                  variant="destructive"
+                  disabled={createLeaseDraft.isPending}
+                  onClick={discardExistingDraft}
+                >
+                  Discard and start new
+                </Button>
+              ) : null}
+              <Button className="h-11 py-6" disabled={createLeaseDraft.isPending} onClick={resumeExistingDraft}>
+                Resume draft
+              </Button>
+            </AlertDialogFooter>
+            <div className="mt-8 md:hidden">
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button className="w-full justify-between" disabled={createLeaseDraft.isPending} variant="secondary">
+                    Draft actions
+                    <ChevronDown className="h-4 w-4" />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end" className="z-[70] min-w-56">
+                  <DropdownMenuItem onSelect={() => setExistingUnitDraft(null)}>Choose another unit</DropdownMenuItem>
+                  {hasPermission(currentUserQuery.data?.permissions, "leases", "delete") ? (
+                    <>
+                      <DropdownMenuSeparator />
+                      <DropdownMenuItem
+                        className="text-red-700 focus:bg-red-50 focus:text-red-700"
+                        onSelect={discardExistingDraft}
+                      >
+                        Discard and start new
+                      </DropdownMenuItem>
+                    </>
+                  ) : null}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem onSelect={resumeExistingDraft}>Resume draft</DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          </AlertDialogContent>
+        </AlertDialog>
+
         <section className="flex flex-1 flex-col transition-[padding] duration-200 lg:pl-[var(--parcelis-sidebar-width)]">
           <header className="parcelis-mobile-nav-header sticky top-0 z-10 flex min-h-16 items-center justify-between border-b border-parcelis-border bg-white/90 px-4 backdrop-blur md:px-8">
-            <Button asChild className="min-w-40" variant="secondary">
+            <Button
+              asChild
+              aria-label="Back to leases"
+              className="h-10 w-10 px-0 md:min-w-40 md:px-4"
+              variant="secondary"
+            >
               <Link href="/leases" onClick={preventUnsafeExit}>
                 <ArrowLeft className="h-4 w-4" />
-                Leases
+                <span className="hidden md:inline">Leases</span>
               </Link>
             </Button>
-            <span className="text-sm font-medium text-parcelis-gray">
-              Step {currentIndex + 1} of {leaseCreationSteps.length}
-            </span>
+            <div className="flex items-center gap-2">
+              <span
+                className={`text-sm font-medium text-parcelis-gray ${currentIndex === 0 ? "hidden md:inline" : ""}`}
+              >
+                Step {currentIndex + 1} of {leaseCreationSteps.length}
+              </span>
+              {currentIndex === 0 || currentIndex === 1 ? (
+                <Button
+                  className="min-w-40"
+                  onClick={() => (currentIndex === 0 ? setIsPropertyDrawerOpen(true) : setIsTenantDrawerOpen(true))}
+                  type="button"
+                >
+                  <Plus className="h-4 w-4" />
+                  {currentIndex === 0 ? "Add Property" : "Add Tenant"}
+                </Button>
+              ) : null}
+            </div>
           </header>
 
           <div className="parcelis-page-shell flex flex-1 flex-col">
@@ -2137,32 +2305,56 @@ function NewLeasePageContent() {
                     </Alert>
                   ) : null}
                   {currentIndex === 0 ? (
-                    <PropertySelector
-                      error={currentStepError}
-                      onAddProperty={() => setIsPropertyDrawerOpen(true)}
-                      onValueChange={({ propertyId, unitId, monthlyRentCents }) => {
-                        setStepError(null);
-                        const leaseDraftKey = draftIdentity.leaseDraftKey || crypto.randomUUID();
-                        if (!draftIdentity.leaseId && !createLeaseDraft.isPending) {
-                          setDraftIdentity((current) => ({ ...current, leaseDraftKey }));
-                          createLeaseDraft.mutate({ leaseDraftKey, propertyId, unitId });
-                        }
-                        setDraft((current) => ({
-                          ...current,
-                          propertyId,
-                          unitId,
-                          monthlyRentCents,
-                        }));
-                      }}
-                      value={draft.unitId}
-                    />
+                    <fieldset
+                      className="min-w-0"
+                      disabled={
+                        isSelectingUnit ||
+                        createLeaseDraft.isPending ||
+                        Boolean(draftKeyFromUrl && leaseDraftQuery.isPending)
+                      }
+                    >
+                      <PropertySelector
+                        error={currentStepError}
+                        onValueChange={async (selection) => {
+                          if (createLeaseDraft.isPending || isSelectingUnit || selection.unitId === draft.unitId)
+                            return;
+                          setIsSelectingUnit(true);
+                          try {
+                            if (!(await flushDraftSave())) return;
+                            setStepError(null);
+                            if (draftIdentity.leaseId) {
+                              const drafts = await apiClient.leases.drafts.query();
+                              const existing = drafts.find(
+                                (lease) => lease.unitId === selection.unitId && lease.id !== draftIdentity.leaseId,
+                              );
+                              if (existing) {
+                                setExistingUnitDraft({ lease: existing, selection });
+                              } else {
+                                setDraft((current) => ({ ...current, ...selection }));
+                              }
+                              return;
+                            }
+                            createLeaseDraft.mutate({
+                              ...selection,
+                              leaseDraftKey: draftIdentity.leaseDraftKey || crypto.randomUUID(),
+                            });
+                          } catch (error) {
+                            setStepError(
+                              error instanceof Error ? error.message : "Unable to check drafts for this unit.",
+                            );
+                          } finally {
+                            setIsSelectingUnit(false);
+                          }
+                        }}
+                        value={draft.unitId}
+                      />
+                    </fieldset>
                   ) : currentIndex === 1 ? (
                     <ResidentsSelector
                       allowPartialPayments={draft.allowPartialPayments}
                       billingResponsibility={draft.billingResponsibility}
                       error={currentStepError}
                       monthlyRentCents={draft.monthlyRentCents}
-                      onAddTenant={() => setIsTenantDrawerOpen(true)}
                       onAllowPartialPaymentsChange={(allowPartialPayments) =>
                         setDraft((current) => ({ ...current, allowPartialPayments }))
                       }
@@ -2279,7 +2471,13 @@ function NewLeasePageContent() {
                   )}
                   <Button
                     className="min-w-40"
-                    disabled={isLastStep || (currentIndex === 0 && draft.unitId === null)}
+                    disabled={
+                      isLastStep ||
+                      createLeaseDraft.isPending ||
+                      isSelectingUnit ||
+                      Boolean(existingUnitDraft) ||
+                      (currentIndex === 0 && draft.unitId === null)
+                    }
                     type="submit"
                   >
                     {isLastStep ? "Create lease" : "Next"}
