@@ -73,6 +73,9 @@ Packages:
 - `packages/db`: Prisma schema, migrations, and database client exports.
 - `packages/config`: shared TypeScript, ESLint, and Prettier configuration.
 
+`@parcelis/db` exposes TypeScript source to native Node. Relative source imports must use the
+actual `.ts` extension; the shared TypeScript configuration rewrites these to `.js` in builds.
+
 ### Local development
 
 Install dependencies and run the apps on your machine with hot reload:
@@ -146,6 +149,25 @@ Keep API unit and router tests in feature folders under `apps/api/src/tests`, su
 
 ```bash
 pnpm --filter @parcelis/api test
+```
+
+The durable outbox and worker dispatcher use the same Node test runner. Script tests also run in the CI quality job:
+
+```bash
+pnpm --filter @parcelis/db test
+pnpm --filter @parcelis/worker test
+pnpm test:scripts
+```
+
+The outbox PostgreSQL integration tests require a separate test database whose name
+contains `test`. Create the database, then point `OUTBOX_TEST_DATABASE_URL` at it.
+The tests compare normalized host, port, database, and schema against `DATABASE_URL`, ignoring credentials and unrelated connection parameters. Host aliases are not resolved, so use a genuinely separate test database. Each test creates a unique temporary schema from the current Prisma schema with `prisma db push` and drops it afterward; the test user needs schema creation privileges. Interrupted runs may leave isolated schemas, but subsequent runs do not claim their events. Unit test commands exclude integration suites:
+
+```bash
+createdb -h localhost -p 54320 -U parcelis parcelis_test
+DATABASE_URL=postgresql://parcelis:parcelis@localhost:54320/parcelis_test?schema=public pnpm --filter @parcelis/db db:migrate
+OUTBOX_TEST_DATABASE_URL=postgresql://parcelis:parcelis@localhost:54320/parcelis_test?schema=public pnpm --filter @parcelis/db test:integration
+OUTBOX_TEST_DATABASE_URL=postgresql://parcelis:parcelis@localhost:54320/parcelis_test?schema=public pnpm --filter @parcelis/worker test:integration
 ```
 
 ### End-to-end tests
