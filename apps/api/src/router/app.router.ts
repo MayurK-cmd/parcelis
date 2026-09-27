@@ -1214,6 +1214,7 @@ export const appRouter = router({
               endsOn: true,
               termType: true,
               status: true,
+              unitId: true,
               unit: { select: { name: true } },
               tenants: {
                 select: {
