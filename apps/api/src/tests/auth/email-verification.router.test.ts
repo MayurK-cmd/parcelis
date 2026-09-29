@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 import { TRPCError } from "@trpc/server";
 import { getEmailTransporter, resetEmailTransporter } from "@parcelis/email";
-import { hashEmailVerificationToken, hashPassword } from "../../modules/auth";
+import { hashEmailVerificationToken, hashPassword, hashPasswordResetToken } from "../../modules/auth";
 import { resetRateLimits } from "../../modules/login-rate-limit";
 import type { PrismaService } from "../../modules/prisma.service";
 import { appRouter } from "../../router/app.router";
@@ -27,10 +27,41 @@ type VerificationToken = {
   userId: number;
 };
 
+type PasswordResetToken = {
+  expiresAt: Date;
+  id: number;
+  tokenHash: string;
+  usedAt: Date | null;
+  userId: number;
+};
+
 type OrganizationMembership = {
   organizationId: number;
   role?: string;
   userId: number;
+};
+
+type OutboxEvent = {
+  availableAt: Date;
+  eventType: string;
+  id: number;
+  idempotencyKey: string;
+  organizationId: number;
+  payload: unknown;
+  schemaVersion: number;
+};
+
+type NotificationDelivery = {
+  channel: "email";
+  destination: string;
+  id: number;
+  idempotencyKey: string;
+  organizationId: number;
+  outboxEventId: number;
+  recipientId: number;
+  recipientType: string;
+  status: "queued";
+  subject: string;
 };
 
 test.beforeEach(() => {
@@ -40,11 +71,17 @@ test.beforeEach(() => {
 function createPrisma() {
   const users: User[] = [];
   const tokens: VerificationToken[] = [];
+  const passwordResetTokens: PasswordResetToken[] = [];
   const sessions: Array<{ userId: number }> = [];
   const organizationMemberships: OrganizationMembership[] = [];
+  const outboxEvents: OutboxEvent[] = [];
+  const notificationDeliveries: NotificationDelivery[] = [];
+  const transactions: Promise<unknown>[] = [];
   let nextUserId = 1;
   let nextTokenId = 1;
   let nextOrganizationId = 1;
+  let nextOutboxEventId = 1;
+  let nextNotificationDeliveryId = 1;
 
   const prisma: PrismaService = {
     user: {
@@ -88,11 +125,7 @@ function createPrisma() {
         organizationMemberships.push(data);
         return data;
       },
-      findUnique: async ({
-        where,
-      }: {
-        where: { userId_organizationId: { organizationId: number; userId: number } };
-      }) =>
+      findUnique: async ({ where }: { where: { userId_organizationId: { organizationId: number; userId: number } } }) =>
         organizationMemberships.find(
           (membership) =>
             membership.userId === where.userId_organizationId.userId &&
@@ -153,16 +186,112 @@ function createPrisma() {
         return { count: 1 };
       },
     },
+    passwordResetToken: {
+      create: async ({ data }: { data: Omit<PasswordResetToken, "id" | "usedAt"> }) => {
+        const token = { ...data, id: nextTokenId++, usedAt: null };
+        passwordResetTokens.push(token);
+        return token;
+      },
+      deleteMany: async ({ where }: { where: { userId: number } }) => {
+        const removed = passwordResetTokens.filter((token) => token.userId === where.userId).length;
+        for (let index = passwordResetTokens.length - 1; index >= 0; index -= 1) {
+          const token = passwordResetTokens[index];
+          if (token && token.userId === where.userId) {
+            passwordResetTokens.splice(index, 1);
+          }
+        }
+        return { count: removed };
+      },
+      findUnique: async ({ where }: { where: { tokenHash: string } }) => {
+        const token = passwordResetTokens.find((candidate) => candidate.tokenHash === where.tokenHash);
+        if (!token) return null;
+        const user = users.find((candidate) => candidate.id === token.userId);
+        return user ? { ...token, user: { accountStatus: user.accountStatus } } : null;
+      },
+      updateMany: async ({
+        where,
+        data,
+      }: {
+        where: { expiresAt: { gt: Date }; id: number; usedAt: null };
+        data: { usedAt: Date };
+      }) => {
+        const token = passwordResetTokens.find(
+          (candidate) =>
+            candidate.id === where.id && candidate.usedAt === null && candidate.expiresAt > where.expiresAt.gt,
+        );
+        if (!token) return { count: 0 };
+        token.usedAt = data.usedAt;
+        return { count: 1 };
+      },
+    },
     session: {
       create: async ({ data }: { data: { userId: number } }) => {
         sessions.push({ userId: data.userId });
         return {};
       },
+      updateMany: async () => ({ count: 1 }),
     },
-    $transaction: async <T>(callback: (tx: PrismaService) => Promise<T>) => callback(prisma),
+    outboxEvent: {
+      createMany: async ({ data }: { data: Omit<OutboxEvent, "id"> }) => {
+        const duplicate = outboxEvents.some(
+          (event) => event.organizationId === data.organizationId && event.idempotencyKey === data.idempotencyKey,
+        );
+        if (!duplicate) {
+          outboxEvents.push({ ...data, id: nextOutboxEventId++ });
+          return { count: 1 };
+        }
+        return { count: 0 };
+      },
+      findUniqueOrThrow: async ({
+        where,
+      }: {
+        where: { organizationId_idempotencyKey: { idempotencyKey: string; organizationId: number } };
+      }) => {
+        const event = outboxEvents.find(
+          (candidate) =>
+            candidate.organizationId === where.organizationId_idempotencyKey.organizationId &&
+            candidate.idempotencyKey === where.organizationId_idempotencyKey.idempotencyKey,
+        );
+        if (!event) throw new Error("Outbox event not found.");
+        return event;
+      },
+    },
+    notificationDelivery: {
+      createMany: async ({ data }: { data: Omit<NotificationDelivery, "id"> }) => {
+        const duplicate = notificationDeliveries.some((delivery) => delivery.outboxEventId === data.outboxEventId);
+        if (!duplicate) {
+          notificationDeliveries.push({ ...data, id: nextNotificationDeliveryId++ });
+          return { count: 1 };
+        }
+        return { count: 0 };
+      },
+      findUniqueOrThrow: async ({ where }: { where: { outboxEventId: number } }) => {
+        const delivery = notificationDeliveries.find((candidate) => candidate.outboxEventId === where.outboxEventId);
+        if (!delivery) throw new Error("Notification delivery not found.");
+        return delivery;
+      },
+    },
+    $transaction: <T>(callback: (tx: PrismaService) => Promise<T>) => {
+      const transaction = callback(prisma);
+      transactions.push(transaction);
+      return transaction;
+    },
   } as unknown as PrismaService;
 
-  return { organizationMemberships, prisma, sessions, tokens, users };
+  return {
+    organizationMemberships,
+    outboxEvents,
+    passwordResetTokens,
+    prisma,
+    sessions,
+    tokens,
+    users,
+    waitForTransaction: async () => {
+      const transaction = transactions.at(-1);
+      assert.ok(transaction, "Expected a background transaction");
+      await transaction;
+    },
+  };
 }
 
 function createCaller(prisma: PrismaService) {
@@ -240,9 +369,13 @@ test("registration creates a pending account and one verification token without 
   assert.equal(state.tokens.length, 1);
   assert.notEqual(state.tokens[0]?.tokenHash, "new@example.com");
   assert.equal(state.sessions.length, 0);
-  assert.equal(emailDelivery.messages.length, 1);
-  assert.equal(emailDelivery.messages[0]?.to, "new@example.com");
-  assert.match(emailDelivery.messages[0]?.html ?? "", /mode=verify/);
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.outboxEvents.length, 1);
+  assert.equal(state.outboxEvents[0]?.eventType, "notification.email");
+  assert.match(state.outboxEvents[0]?.idempotencyKey ?? "", /auth\.register/);
+  const payload = state.outboxEvents[0]?.payload as { body: string; email: string };
+  assert.equal(payload.email, "new@example.com");
+  assert.match(payload.body, /mode=verify/);
 });
 
 test("verification activates a pending account and consumes its token", async () => {
@@ -366,7 +499,7 @@ test("resending verification preserves prior tokens for pending accounts", async
       passwordHash: await hashPassword("password-for-new-user"),
       role: "property_manager",
       accountStatus: "pending",
-      defaultOrganizationId: null,
+      defaultOrganizationId: 1,
     },
   });
   await state.prisma.emailVerificationToken.create({
@@ -374,13 +507,19 @@ test("resending verification preserves prior tokens for pending accounts", async
   });
 
   await createCaller(state.prisma).auth.requestEmailVerification({ email: user.email });
-  await emailDelivery.sent;
+  await state.waitForTransaction();
   assert.equal(state.tokens.length, 2);
   assert.ok(state.tokens.some((token) => token.tokenHash === "old-token"));
   assert.ok(state.tokens.some((token) => token.tokenHash !== "old-token"));
-  assert.equal(emailDelivery.messages.length, 1);
-  assert.equal(emailDelivery.messages[0]?.to, user.email);
-  assert.match(emailDelivery.messages[0]?.html ?? "", /mode=verify/);
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.outboxEvents.length, 1);
+  assert.equal(state.outboxEvents[0]?.eventType, "notification.email");
+  assert.equal(state.outboxEvents[0]?.organizationId, 1);
+  assert.equal(state.outboxEvents[0]?.schemaVersion, 1);
+  assert.match(state.outboxEvents[0]?.idempotencyKey ?? "", /auth\.request-email-verification/);
+  const payload = state.outboxEvents[0]?.payload as { body: string; email: string };
+  assert.equal(payload.email, user.email);
+  assert.match(payload.body, /mode=verify/);
 });
 
 test("resending verification removes expired tokens", async (t) => {
@@ -399,7 +538,7 @@ test("resending verification removes expired tokens", async (t) => {
       passwordHash: await hashPassword("password-for-new-user"),
       role: "property_manager",
       accountStatus: "pending",
-      defaultOrganizationId: null,
+      defaultOrganizationId: 1,
     },
   });
   await state.prisma.emailVerificationToken.create({
@@ -407,10 +546,12 @@ test("resending verification removes expired tokens", async (t) => {
   });
 
   await createCaller(state.prisma).auth.requestEmailVerification({ email: user.email });
-  await emailDelivery.sent;
+  await state.waitForTransaction();
 
   assert.equal(state.tokens.length, 1);
   assert.notEqual(state.tokens[0]?.tokenHash, "expired-token");
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.outboxEvents.length, 1);
 });
 
 test("resending verification does not reveal whether an account exists", async (t) => {
@@ -425,6 +566,129 @@ test("resending verification does not reveal whether an account exists", async (
   const response = await createCaller(state.prisma).auth.requestEmailVerification({ email: "missing@example.com" });
   assert.deepEqual(response, { success: true });
   assert.equal(state.tokens.length, 0);
+});
+
+test("requesting email verification without a default organization sends email directly", async (t) => {
+  const emailDelivery = mockEmailDelivery();
+  t.after(() => {
+    mock.restoreAll();
+    emailDelivery.restore();
+    resetEmailTransporter();
+  });
+  const state = createPrisma();
+  const user = await state.prisma.user.create({
+    data: {
+      name: "Pending User",
+      email: "no-org-verify@example.com",
+      phone: null,
+      passwordHash: await hashPassword("password-for-new-user"),
+      role: "property_manager",
+      accountStatus: "pending",
+      defaultOrganizationId: null,
+    },
+  });
+
+  const response = await createCaller(state.prisma).auth.requestEmailVerification({ email: user.email });
+  await state.waitForTransaction();
+  await emailDelivery.sent;
+
+  assert.deepEqual(response, { success: true });
+  assert.equal(state.tokens.length, 1);
+  assert.equal(state.outboxEvents.length, 0);
+  assert.equal(emailDelivery.messages.length, 1);
+  assert.equal(emailDelivery.messages[0]?.to, user.email);
+  assert.match(emailDelivery.messages[0]?.html ?? "", /Verify your Parcelis email/);
+});
+
+test("requesting password reset for active users creates one token and enqueues notification", async (t) => {
+  const emailDelivery = mockEmailDelivery();
+  t.after(() => {
+    mock.restoreAll();
+    emailDelivery.restore();
+    resetEmailTransporter();
+  });
+  const state = createPrisma();
+  const user = await state.prisma.user.create({
+    data: {
+      name: "Active User",
+      email: "reset-active@example.com",
+      phone: null,
+      passwordHash: await hashPassword("password-for-active-user"),
+      role: "property_manager",
+      accountStatus: "active",
+      defaultOrganizationId: 1,
+    },
+  });
+  await state.prisma.passwordResetToken.create({
+    data: {
+      userId: user.id,
+      tokenHash: hashPasswordResetToken("old-token"),
+      expiresAt: new Date(Date.now() + 60_000),
+    },
+  });
+
+  const response = await createCaller(state.prisma).auth.requestPasswordReset({ email: user.email });
+  await state.waitForTransaction();
+
+  assert.deepEqual(response, { success: true });
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.passwordResetTokens.length, 1);
+  assert.notEqual(state.passwordResetTokens[0]?.tokenHash, hashPasswordResetToken("old-token"));
+  assert.equal(state.outboxEvents.length, 1);
+  assert.equal(state.outboxEvents[0]?.eventType, "notification.email");
+  assert.match(state.outboxEvents[0]?.idempotencyKey ?? "", /auth\.request-password-reset/);
+  const payload = state.outboxEvents[0]?.payload as { body: string; email: string };
+  assert.equal(payload.email, user.email);
+  assert.match(payload.body, /mode=reset/);
+});
+
+test("requesting password reset without a default organization sends email directly", async (t) => {
+  const emailDelivery = mockEmailDelivery();
+  t.after(() => {
+    mock.restoreAll();
+    emailDelivery.restore();
+    resetEmailTransporter();
+  });
+  const state = createPrisma();
+  const user = await state.prisma.user.create({
+    data: {
+      name: "Active User",
+      email: "no-org-reset@example.com",
+      phone: null,
+      passwordHash: await hashPassword("password-for-active-user"),
+      role: "property_manager",
+      accountStatus: "active",
+      defaultOrganizationId: null,
+    },
+  });
+
+  const response = await createCaller(state.prisma).auth.requestPasswordReset({ email: user.email });
+  await state.waitForTransaction();
+  await emailDelivery.sent;
+
+  assert.deepEqual(response, { success: true });
+  assert.equal(state.passwordResetTokens.length, 1);
+  assert.equal(state.outboxEvents.length, 0);
+  assert.equal(emailDelivery.messages.length, 1);
+  assert.equal(emailDelivery.messages[0]?.to, user.email);
+  assert.match(emailDelivery.messages[0]?.html ?? "", /Reset your Parcelis password/);
+});
+
+test("requesting password reset does not reveal account existence", async (t) => {
+  const emailDelivery = mockEmailDelivery();
+  t.after(() => {
+    mock.restoreAll();
+    emailDelivery.restore();
+    resetEmailTransporter();
+  });
+  const state = createPrisma();
+
+  const response = await createCaller(state.prisma).auth.requestPasswordReset({ email: "missing-reset@example.com" });
+
+  assert.deepEqual(response, { success: true });
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.passwordResetTokens.length, 0);
+  assert.equal(state.outboxEvents.length, 0);
 });
 
 test("authorized user creation creates a pending account and verification token", async (t) => {
@@ -446,9 +710,13 @@ test("authorized user creation creates a pending account and verification token"
 
   assert.equal(state.users[0]?.accountStatus, "pending");
   assert.equal(state.tokens.length, 1);
-  assert.equal(emailDelivery.messages.length, 1);
-  assert.equal(emailDelivery.messages[0]?.to, "created@example.com");
-  assert.match(emailDelivery.messages[0]?.html ?? "", /mode=verify/);
+  assert.equal(emailDelivery.messages.length, 0);
+  assert.equal(state.outboxEvents.length, 1);
+  assert.equal(state.outboxEvents[0]?.eventType, "notification.email");
+  assert.match(state.outboxEvents[0]?.idempotencyKey ?? "", /users\.create/);
+  const payload = state.outboxEvents[0]?.payload as { body: string; email: string };
+  assert.equal(payload.email, "created@example.com");
+  assert.match(payload.body, /mode=verify/);
 });
 
 test("pending users cannot have their email changed through profile updates", async () => {
@@ -477,7 +745,8 @@ test("pending users cannot have their email changed through profile updates", as
       phone: null,
     }),
     (error: unknown) =>
-      error instanceof TRPCError && error.message === "A pending user's email address cannot be changed before verification.",
+      error instanceof TRPCError &&
+      error.message === "A pending user's email address cannot be changed before verification.",
   );
   assert.equal(state.users[0]?.email, "pending-profile@example.com");
 });

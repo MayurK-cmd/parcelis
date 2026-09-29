@@ -482,6 +482,9 @@ importers:
       '@parcelis/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@parcelis/email':
+        specifier: workspace:*
+        version: link:../../packages/email
       '@parcelis/jobs':
         specifier: workspace:*
         version: link:../../packages/jobs
@@ -559,6 +562,9 @@ importers:
 
   packages/email:
     dependencies:
+      '@parcelis/db':
+        specifier: workspace:*
+        version: link:../db
       nodemailer:
         specifier: ^10.0.0
         version: 10.0.10
@@ -603,6 +609,9 @@ importers:
       '@types/node':
         specifier: 24.13.6
         version: 24.13.6
+      tsx:
+        specifier: ^4.23.12
+        version: 4.23.15
       typescript:
         specifier: 6.0.3
         version: 6.0.3

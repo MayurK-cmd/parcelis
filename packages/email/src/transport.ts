@@ -8,13 +8,13 @@ export function createEmailTransporter(config: EmailConfig) {
     {
       auth: config.user && config.password ? { pass: config.password, user: config.user } : undefined,
       host: config.host,
+      ignoreTLS: config.ignoreTLS,
       port: config.port,
       requireTLS: config.requireTLS,
       secure: config.secure,
     },
     { from: config.from },
   );
-
 }
 
 export function getEmailTransporter() {
