@@ -56,9 +56,6 @@ function createPrisma(event: OutboxEvent, failDispatchedUpdate = false) {
         return { count: 1 };
       },
     },
-    notificationDelivery: {
-      findMany: async () => [],
-    },
   };
 
   return { prisma: prisma as unknown as PrismaClient, getEvent: () => current };
@@ -183,7 +180,6 @@ test("reconciles dispatched email deliveries when their BullMQ job is missing", 
       body: "Your rent is due",
     },
   });
-  let readDeliveries = false;
   const prisma = {
     notificationDelivery: {
       findMany: async (args: {
@@ -193,8 +189,6 @@ test("reconciles dispatched email deliveries when their BullMQ job is missing", 
         assert.deepEqual(args.where.status.in, ["queued", "sending"]);
         assert.equal(args.where.outboxEvent.is.status, "dispatched");
         assert.equal(args.take, 100);
-        if (readDeliveries) return [];
-        readDeliveries = true;
         return [{ id: 14, status: "queued", outboxEvent: event }];
       },
     },
@@ -251,14 +245,9 @@ test("does not redispatch a notification when its BullMQ job still exists", asyn
       body: "Your rent is due",
     },
   });
-  let readDeliveries = false;
   const prisma = {
     notificationDelivery: {
-      findMany: async () => {
-        if (readDeliveries) return [];
-        readDeliveries = true;
-        return [{ id: 14, status: "sending", outboxEvent: event }];
-      },
+      findMany: async () => [{ id: 14, status: "sending", outboxEvent: event }],
     },
   } as unknown as PrismaClient;
   let readded = false;
@@ -271,6 +260,48 @@ test("does not redispatch a notification when its BullMQ job still exists", asyn
 
   await reconcileDispatchedNotificationJobs(prisma, new Map([["account-notifications", queue]]));
   assert.equal(readded, false);
+});
+
+test("notification recovery processes a second page after a full batch", async () => {
+  const payload = {
+    organizationId: 7,
+    recipientId: 9,
+    recipientType: "tenant",
+    email: "tenant@example.com",
+    subject: "Reminder",
+    body: "Your rent is due",
+  };
+  const delivery = (id: number) => ({
+    id,
+    status: "queued",
+    outboxEvent: createEvent({ id: id + 1000, eventType: "notification.email", status: "dispatched", payload }),
+  });
+  const firstPage = Array.from({ length: 100 }, (_, index) => delivery(index + 1));
+  const secondPage = [delivery(101)];
+  const cursors: number[] = [];
+  const prisma = {
+    notificationDelivery: {
+      findMany: async ({ where, take }: { where: { id: { gt: number } }; take: number }) => {
+        cursors.push(where.id.gt);
+        assert.equal(take, 100);
+        return where.id.gt === 0 ? firstPage : secondPage;
+      },
+    },
+  } as unknown as PrismaClient;
+  const checkedJobIds: string[] = [];
+  const queue = {
+    getJob: async (jobId: string) => {
+      checkedJobIds.push(jobId);
+      return { id: jobId };
+    },
+    add: async () => assert.fail("Existing jobs must not be restored"),
+  } as unknown as Queue;
+
+  await reconcileDispatchedNotificationJobs(prisma, new Map([["account-notifications", queue]]));
+
+  assert.deepEqual(cursors, [0, 100]);
+  assert.equal(checkedJobIds.length, 101);
+  assert.equal(checkedJobIds.at(-1), "outbox-event-1101");
 });
 
 test("recovery carries the accepted SMTP message ID into a replacement job", async () => {

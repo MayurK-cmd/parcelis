@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import type { PrismaClient } from "@parcelis/db";
 import type { EmailConfig } from "./config.js";
+import { EmailConfigurationError } from "./email-configuration-error.js";
 
 const encryptionAlgorithm = "aes-256-gcm";
 const initializationVectorLength = 12;
@@ -8,11 +9,14 @@ const authenticationTagLength = 16;
 
 function getEncryptionKey() {
   const value = process.env.EMAIL_SETTINGS_ENCRYPTION_KEY;
-  if (!value) throw new Error("EMAIL_SETTINGS_ENCRYPTION_KEY must be configured before using saved SMTP credentials.");
+  if (!value)
+    throw new EmailConfigurationError(
+      "EMAIL_SETTINGS_ENCRYPTION_KEY must be configured before using saved SMTP credentials.",
+    );
 
   const key = Buffer.from(value, "base64");
   if (key.length !== 32) {
-    throw new Error("EMAIL_SETTINGS_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
+    throw new EmailConfigurationError("EMAIL_SETTINGS_ENCRYPTION_KEY must be a base64-encoded 32-byte key.");
   }
 
   return key;
@@ -78,19 +82,26 @@ export async function getOrganizationEmailConfig(
         : settings.securityType === "none"
           ? { ignoreTLS: true, secure: false }
           : null;
-  if (!security) throw new Error("Organization email settings have an invalid security type.");
+  if (!security) throw new EmailConfigurationError("Organization email settings have an invalid security type.");
 
   const from = settings.fromName ? `${settings.fromName} <${settings.fromEmail}>` : settings.fromEmail;
 
   if (!settings.requireSignIn) return { from, host: settings.host, port: settings.port, ...security };
   if (!settings.username || !settings.passwordCipher) {
-    throw new Error("Organization email settings require a username and password.");
+    throw new EmailConfigurationError("Organization email settings require a username and password.");
+  }
+
+  let password: string;
+  try {
+    password = decryptEmailSettingsPassword(settings.passwordCipher);
+  } catch (error) {
+    throw new EmailConfigurationError("Organization email settings could not be decrypted.", { cause: error });
   }
 
   return {
     from,
     host: settings.host,
-    password: decryptEmailSettingsPassword(settings.passwordCipher),
+    password,
     port: settings.port,
     user: settings.username,
     ...security,
