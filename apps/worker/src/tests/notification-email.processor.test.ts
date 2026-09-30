@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PrismaClient } from "@parcelis/db";
-import { EmailConfigurationError, getOrganizationEmailConfig } from "@parcelis/email";
+import { EmailConfigurationError, getOrganizationEmailConfig, renderVerificationEmail } from "@parcelis/email";
 import { UnrecoverableError } from "bullmq";
 import { processNotificationEmailJob } from "../processors/notification-email.processor.js";
 
@@ -45,6 +45,51 @@ test("processNotificationEmailJob validates payload and sends plain-text body as
     html: '<pre style="font-family:inherit;white-space:pre-wrap;margin:0">Hello\nUse this link</pre>',
   });
   assert.deepEqual(marks, ["sending:42", "sent:42:msg-123"]);
+});
+
+for (const template of [
+  { kind: "account-verification", url: "https://parcelis.example/login?mode=verify#token=verify-token" },
+  { kind: "password-reset", url: "https://parcelis.example/login?mode=reset#token=reset-token" },
+] as const) {
+  test(`processNotificationEmailJob renders the ${template.kind} template`, async () => {
+    let sent: { html: string; text: string } | undefined;
+
+    await processNotificationEmailJob(
+      {
+        organizationId: 7,
+        recipientId: 12,
+        recipientType: "user",
+        email: "person@example.com",
+        subject:
+          template.kind === "account-verification" ? "Verify your Parcelis email" : "Reset your Parcelis password",
+        body: "Legacy fallback body",
+        template,
+        outboxEventId: 42,
+      },
+      {
+        rememberAccepted: async () => {},
+        getEmailConfig: async () => undefined,
+        send: async (message) => {
+          sent = message;
+          return { messageId: "msg-123" };
+        },
+      },
+    );
+
+    assert.ok(sent);
+    assert.match(sent.html, new RegExp(template.kind === "account-verification" ? "Verify email" : "Reset password"));
+    assert.ok(sent.html.includes(template.url));
+    assert.match(sent.text, /parcelis\.example\/login/);
+    assert.ok(!sent.html.includes("Legacy fallback body"));
+  });
+}
+
+test("React Email escapes ampersands in an action URL", async () => {
+  const url = "https://parcelis.example/login?mode=verify&campaign=example#token=verify-token";
+  const { html } = await renderVerificationEmail(url);
+
+  assert.ok(html.includes(url.replaceAll("&", "&amp;")));
+  assert.ok(!html.includes(url));
 });
 
 test("processNotificationEmailJob keeps a temporary failure queued for BullMQ retry", async () => {
