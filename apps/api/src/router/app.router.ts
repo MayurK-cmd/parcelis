@@ -6,6 +6,7 @@ import {
   outboxEventByIdInputSchema,
   outboxEventListInputSchema,
   leaseDraftUpdateInputSchema,
+  leaseDraftFinalizeInputSchema,
   leaseDraftDataSchema,
   leaseDraftCreateInputSchema,
   leaseDraftByKeyInputSchema,
@@ -89,7 +90,9 @@ import {
   UnitType,
   type UserRole,
   replayFailedOutboxEvent,
+  recordOutboxEvent,
 } from "@parcelis/db";
+import { outboxEventTypes } from "@parcelis/jobs";
 import { TRPCError } from "@trpc/server";
 import {
   createPropertyImageDownloadUrl,
@@ -425,6 +428,27 @@ function getInvoiceStatus(dueOn: Date, balanceCents: number) {
 export function getMonthlyDueDate(periodStartsOn: Date, rentDueDay: number) {
   const lastDayOfMonth = new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth() + 1, 0).getDate();
   return new Date(periodStartsOn.getFullYear(), periodStartsOn.getMonth(), Math.min(rentDueDay, lastDayOfMonth));
+}
+
+function isFutureLeaseStart(startsOn: Date) {
+  return startsOn.toISOString().slice(0, 10) > new Date().toISOString().slice(0, 10);
+}
+
+function leaseOverlapWhere(
+  organizationId: number,
+  unitId: number,
+  startsOn: Date,
+  endsOn: Date | null,
+  exceptId?: number,
+): Prisma.LeaseWhereInput {
+  return {
+    organizationId,
+    unitId,
+    ...(exceptId ? { id: { not: exceptId } } : {}),
+    status: { in: [LeaseStatus.active, LeaseStatus.notice, LeaseStatus.scheduled] },
+    ...(endsOn ? { startsOn: { lte: endsOn } } : {}),
+    OR: [{ endsOn: null }, { endsOn: { gte: startsOn } }],
+  };
 }
 
 async function synchronizeOverdueInvoices(prisma: PrismaClient | Prisma.TransactionClient) {
@@ -2059,6 +2083,15 @@ export const appRouter = router({
     createLease: permissionProcedure("leases", "create")
       .input(createLeaseInputSchema)
       .mutation(async ({ ctx, input }) => {
+        if (
+          input.status === LeaseStatus.scheduled ||
+          (input.status !== LeaseStatus.draft && isFutureLeaseStart(input.startsOn))
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Future leases must be completed through the lease draft wizard.",
+          });
+        }
         await Promise.all([
           requirePermission(ctx.prisma, ctx.user.role, "properties", "view"),
           requirePermission(ctx.prisma, ctx.user.role, "units", "view"),
@@ -2096,18 +2129,19 @@ export const appRouter = router({
                 where: { id: input.unitId, propertyId: input.propertyId },
               });
 
-              // Check for existing active lease on this unit
-              const existingLease = await tx.lease.findFirst({
-                where: {
-                  propertyId: input.propertyId,
-                  unitId: input.unitId,
-                  status: { in: [LeaseStatus.active, LeaseStatus.notice] },
-                },
-                select: { id: true },
-              });
-
-              if (existingLease) {
-                throw new TRPCError({ code: "CONFLICT", message: "The selected unit already has an active lease." });
+              if (input.status !== LeaseStatus.draft) {
+                const existingLease = await tx.lease.findFirst({
+                  where: leaseOverlapWhere(
+                    ctx.organization.organizationId,
+                    input.unitId,
+                    input.startsOn,
+                    input.endsOn,
+                  ),
+                  select: { id: true },
+                });
+                if (existingLease) {
+                  throw new TRPCError({ code: "CONFLICT", message: "This unit has a lease with overlapping dates." });
+                }
               }
 
               const allocationsByTenantId = new Map(
@@ -3702,12 +3736,12 @@ export const appRouter = router({
             startsOn: true,
             endsOn: true,
             monthlyRentCents: true,
+            rentDueDay: true,
             property: { select: { id: true, name: true } },
             unit: { select: { id: true, name: true } },
             tenants: {
               select: { tenant: { select: { id: true, firstName: true, lastName: true } } },
             },
-            invoices: { orderBy: { dueOn: "asc" }, take: 1, select: { dueOn: true } },
           },
         });
         return lease ? { ...lease, tenants: lease.tenants.map(({ tenant }) => tenant) } : null;
@@ -3881,6 +3915,174 @@ export const appRouter = router({
           throw error;
         }
       }),
+    finalizeDraft: permissionProcedure("leases", "create")
+      .input(leaseDraftFinalizeInputSchema)
+      .mutation(async ({ ctx, input }) => {
+        const organizationId = ctx.organization.organizationId;
+        await Promise.all([
+          requirePermission(ctx.prisma, ctx.user.role, "leases", "edit"),
+          requirePermission(ctx.prisma, ctx.user.role, "properties", "view"),
+          requirePermission(ctx.prisma, ctx.user.role, "units", "view"),
+          requirePermission(ctx.prisma, ctx.user.role, "tenants", "view"),
+        ]);
+
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          try {
+            return await ctx.prisma.$transaction(
+              async (tx) => {
+                const lease = await tx.lease.findFirst({
+                  where: { id: input.leaseId, organizationId },
+                  include: { tenants: true },
+                });
+                if (!lease || lease.archivedAt) {
+                  throw new TRPCError({ code: "NOT_FOUND", message: "Lease draft not found." });
+                }
+                if (lease.status !== LeaseStatus.draft) {
+                  if (
+                    lease.revision === input.expectedRevision + 1 &&
+                    (lease.status === LeaseStatus.active || lease.status === LeaseStatus.scheduled)
+                  ) {
+                    return lease;
+                  }
+                  throw new TRPCError({ code: "CONFLICT", message: "This lease is already finalized." });
+                }
+                if (lease.revision !== input.expectedRevision) {
+                  throw new TRPCError({ code: "CONFLICT", message: "Lease draft has changed. Reload and try again." });
+                }
+
+                const validation = createLeaseInputSchema.safeParse({
+                  propertyId: lease.propertyId,
+                  unitId: lease.unitId,
+                  tenantIds: lease.tenants.map(({ tenantId }) => tenantId),
+                  termType: lease.termType,
+                  monthlyRentCents: lease.monthlyRentCents,
+                  securityDepositCents: lease.securityDepositCents,
+                  rentDueDay: lease.rentDueDay,
+                  continueMonthToMonthAfterEnd: lease.continueMonthToMonthAfterEnd,
+                  billingResponsibility: lease.billingResponsibility,
+                  allowPartialPayments: lease.allowPartialPayments,
+                  startsOn: lease.startsOn,
+                  endsOn: lease.endsOn,
+                  status: LeaseStatus.active,
+                  tenantAllocations:
+                    lease.billingResponsibility === "individual"
+                      ? lease.tenants.map(({ tenantId, rentShareCents, depositShareCents }) => ({
+                          tenantId,
+                          rentShareCents,
+                          depositShareCents,
+                        }))
+                      : [],
+                });
+                if (!validation.success) {
+                  const issue = validation.error.issues[0];
+                  const field = issue?.path[0];
+                  const section =
+                    field === "propertyId" || field === "unitId"
+                      ? "Property and unit"
+                      : field === "startsOn" || field === "endsOn" || field === "termType" || field === "rentDueDay"
+                        ? "Lease terms"
+                        : "Residents and billing";
+                  throw new TRPCError({
+                    code: "BAD_REQUEST",
+                    message: `${section}: ${issue?.message ?? "Complete the lease before creating it."}`,
+                  });
+                }
+                const completeLease = validation.data;
+                await tx.property.findFirstOrThrow({
+                  where: { id: completeLease.propertyId, organizationId },
+                });
+                await tx.unit.findFirstOrThrow({
+                  where: { id: completeLease.unitId, propertyId: completeLease.propertyId },
+                });
+                const tenants = await tx.tenant.findMany({
+                  where: { id: { in: completeLease.tenantIds }, organizationId },
+                  select: { id: true },
+                });
+                if (tenants.length !== completeLease.tenantIds.length) {
+                  throw new TRPCError({ code: "NOT_FOUND", message: "One or more residents not found." });
+                }
+
+                const overlappingLease = await tx.lease.findFirst({
+                  where: leaseOverlapWhere(
+                    organizationId,
+                    completeLease.unitId,
+                    completeLease.startsOn,
+                    completeLease.endsOn,
+                    lease.id,
+                  ),
+                  select: { id: true },
+                });
+                if (overlappingLease) {
+                  throw new TRPCError({ code: "CONFLICT", message: "This unit has a lease with overlapping dates." });
+                }
+
+                const status = isFutureLeaseStart(completeLease.startsOn) ? LeaseStatus.scheduled : LeaseStatus.active;
+                const updated = await tx.lease.updateMany({
+                  where: {
+                    id: lease.id,
+                    organizationId,
+                    status: LeaseStatus.draft,
+                    archivedAt: null,
+                    revision: input.expectedRevision,
+                  },
+                  data: { status, revision: { increment: 1 } },
+                });
+                if (updated.count !== 1) {
+                  throw new TRPCError({ code: "CONFLICT", message: "Lease draft has changed. Reload and try again." });
+                }
+                if (status === LeaseStatus.active) {
+                  const predecessor = await tx.lease.findFirst({
+                    where: {
+                      organizationId,
+                      unitId: completeLease.unitId,
+                      id: { not: lease.id },
+                      status: { in: [LeaseStatus.active, LeaseStatus.notice] },
+                      endsOn: { lt: completeLease.startsOn },
+                    },
+                    select: { id: true, status: true, propertyId: true },
+                  });
+                  if (predecessor) {
+                    if (!predecessor.propertyId) throw new Error(`Lease ${predecessor.id} has no property.`);
+                    const ended = await tx.lease.updateMany({
+                      where: { id: predecessor.id, organizationId, status: predecessor.status },
+                      data: { status: LeaseStatus.ended },
+                    });
+                    if (ended.count !== 1)
+                      throw new TRPCError({ code: "CONFLICT", message: "The previous lease changed. Please try again." });
+                    const released = await tx.property.updateMany({
+                      where: { id: predecessor.propertyId, organizationId, occupiedUnits: { gt: 0 } },
+                      data: { occupiedUnits: { decrement: 1 } },
+                    });
+                    if (released.count !== 1) throw new Error(`Lease ${predecessor.id} occupancy is inconsistent.`);
+                  }
+                  await tx.property.update({
+                    where: { id: completeLease.propertyId },
+                    data: { occupiedUnits: { increment: 1 } },
+                  });
+                } else {
+                  await recordOutboxEvent(tx, {
+                    organizationId,
+                    eventType: outboxEventTypes.leaseActivation,
+                    schemaVersion: 1,
+                    payload: { organizationId, leaseId: lease.id },
+                    idempotencyKey: `lease:${lease.id}:activate`,
+                    availableAt: completeLease.startsOn,
+                  });
+                }
+                return tx.lease.findFirstOrThrow({ where: { id: lease.id, organizationId } });
+              },
+              { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+            );
+          } catch (error) {
+            if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2034") {
+              if (attempt < 2) continue;
+              throw new TRPCError({ code: "CONFLICT", message: "The lease changed. Please try again." });
+            }
+            throw error;
+          }
+        }
+        throw new TRPCError({ code: "CONFLICT", message: "The lease changed. Please try again." });
+      }),
     /** Archives a lease without changing its contractual status. */
     archive: permissionProcedure("leases", "archive")
       .input(leaseByIdInputSchema)
@@ -3936,6 +4138,15 @@ export const appRouter = router({
     create: permissionProcedure("leases", "create")
       .input(createLeaseWithInvoicesInputSchema)
       .mutation(async ({ ctx, input }) => {
+        if (
+          input.status === LeaseStatus.scheduled ||
+          (input.status !== LeaseStatus.draft && isFutureLeaseStart(input.startsOn))
+        ) {
+          throw new TRPCError({
+            code: "BAD_REQUEST",
+            message: "Future leases must be completed through the lease draft wizard.",
+          });
+        }
         if (input.status === LeaseStatus.draft && input.generateInvoices) {
           throw new TRPCError({
             code: "BAD_REQUEST",
@@ -3967,19 +4178,20 @@ export const appRouter = router({
                   throw new TRPCError({ code: "NOT_FOUND", message: "One or more tenants not found." });
                 }
 
-                if (leaseData.status === LeaseStatus.active || leaseData.status === LeaseStatus.notice) {
+                if (leaseData.status !== LeaseStatus.draft) {
                   const existingLease = await tx.lease.findFirst({
-                    where: {
-                      propertyId,
+                    where: leaseOverlapWhere(
+                      ctx.organization.organizationId,
                       unitId,
-                      status: { in: [LeaseStatus.active, LeaseStatus.notice] },
-                    },
+                      leaseData.startsOn,
+                      leaseData.endsOn,
+                    ),
                     select: { id: true },
                   });
                   if (existingLease) {
                     throw new TRPCError({
                       code: "CONFLICT",
-                      message: "The selected unit already has an active lease.",
+                      message: "This unit has a lease with overlapping dates.",
                     });
                   }
                 }

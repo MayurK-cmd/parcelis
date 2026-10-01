@@ -53,13 +53,12 @@ function formatStatus(status: string) {
 
 function statusTone(status: string) {
   if (status === "active") return "text-parcelis-green";
-  if (status === "notice" || status === "draft") return "text-amber-400";
+  if (status === "notice" || status === "draft" || status === "scheduled") return "text-amber-400";
   return "text-red-400";
 }
 
-function dueDay(value: Date | string | undefined) {
-  if (!value) return "Not set";
-  const day = new Date(value).getDate();
+function dueDay(day: number | undefined) {
+  if (!day) return "Not set";
   const suffix =
     day % 10 === 1 && day !== 11
       ? "st"
@@ -90,7 +89,6 @@ export default function LeaseDetailPage() {
   });
   const leaseRecord = canViewLease ? leaseQuery.data : null;
   const unit = leaseRecord?.unit;
-  const firstInvoice = leaseRecord?.invoices[0];
   const refreshLeaseData = async () => {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["leases"] }),
@@ -231,10 +229,12 @@ export default function LeaseDetailPage() {
                       Lease details
                     </p>
                     <h1 className="mt-5 text-2xl font-bold md:text-4xl">
-                      {leaseRecord.property?.name ?? "Not set"} | {leaseRecord.unit ? `Unit ${leaseRecord.unit.name}` : "Unit not set"}
+                      {leaseRecord.property?.name ?? "Not set"} |{" "}
+                      {leaseRecord.unit ? `Unit ${leaseRecord.unit.name}` : "Unit not set"}
                     </h1>
                     <p className="mt-3 text-md leading-6 text-white/75">
-                      {formatDate(leaseRecord.startsOn)} · {formatLeaseEndDate(leaseRecord.endsOn, leaseRecord.termType)}
+                      {formatDate(leaseRecord.startsOn)} ·{" "}
+                      {formatLeaseEndDate(leaseRecord.endsOn, leaseRecord.termType)}
                     </p>
                   </div>
                   <div className="w-full rounded-md bg-white/10 p-4 md:w-52">
@@ -255,7 +255,7 @@ export default function LeaseDetailPage() {
                   label="Monthly Rent"
                   value={formatCurrency(leaseRecord.monthlyRentCents)}
                 />
-                <Metric icon={CalendarDays} label="Rent Due" value={dueDay(firstInvoice?.dueOn)} />
+                <Metric icon={CalendarDays} label="Rent Due" value={dueDay(leaseRecord.rentDueDay)} />
               </section>
               <section className="mt-5 flex flex-col gap-5 lg:flex-row">
                 <Card className="flex-1">
@@ -298,8 +298,8 @@ export default function LeaseDetailPage() {
                     <Detail icon={CircleDollarSign} label="Monthly Rent">
                       {formatCurrency(leaseRecord.monthlyRentCents)}
                     </Detail>
-                    <Detail icon={CalendarDays} label="Rent Due Date">
-                      {dueDay(firstInvoice?.dueOn)}
+                    <Detail icon={CalendarDays} label="Rent Due Day">
+                      {dueDay(leaseRecord.rentDueDay)}
                     </Detail>
                   </CardContent>
                 </Card>
