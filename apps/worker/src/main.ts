@@ -13,11 +13,21 @@ import {
   getRedisConnectionOptions,
   leaseActivationJobName,
   leaseActivationJobSchema,
+  leaseExpirationJobName,
+  leaseExpirationJobSchema,
+  leaseReconciliationJobName,
   notificationEmailJobName,
   queueNames,
 } from "@parcelis/jobs";
 import { Worker } from "bullmq";
-import { activateScheduledLease, startLeaseActivationReconciler } from "./lease-activation.js";
+import {
+  activateScheduledLease,
+  endExpiredLease,
+  isFinalLeaseJobAttempt,
+  reconcileLeaseLifecycle,
+  recordLeaseLifecycleFailure,
+  startLeaseReconciler,
+} from "./lease-activation.js";
 import { startOutboxDispatcher } from "./outbox-dispatcher.js";
 import { processNotificationEmailJob } from "./processors/notification-email.processor.js";
 
@@ -33,7 +43,8 @@ await prisma.$connect();
 const redisConnection = getRedisConnectionOptions();
 
 // Initialize Redis connection and create queues.
-const queues = Object.values(createQueueRegistry(redisConnection));
+const queueRegistry = createQueueRegistry(redisConnection);
+const queues = Object.values(queueRegistry);
 const queueByName = new Map(queues.map((queue) => [queue.name, queue]));
 
 const notificationEmailWorker = new Worker(
@@ -73,11 +84,38 @@ const notificationEmailWorker = new Worker(
 const leaseActivationWorker = new Worker(
   queueNames.leasingNotifications,
   async (job) => {
+    if (job.name === leaseReconciliationJobName) {
+      return reconcileLeaseLifecycle(prisma);
+    }
+    if (job.name === leaseExpirationJobName) {
+      const { organizationId, leaseId } = leaseExpirationJobSchema.parse(job.data);
+      try {
+        return await endExpiredLease(prisma, organizationId, leaseId);
+      } catch (error) {
+        if (isFinalLeaseJobAttempt(job.attemptsMade, job.opts.attempts)) {
+          await recordLeaseLifecycleFailure(prisma, organizationId, leaseId, "lease.expiration_failed", error).catch(
+            (recordError) =>
+              console.error(`[parcelis] Could not record expiration failure for lease ${leaseId}:`, recordError),
+          );
+        }
+        throw error;
+      }
+    }
     if (job.name !== leaseActivationJobName) {
       throw new Error(`Unsupported lease activation job: ${job.name}.`);
     }
     const { organizationId, leaseId } = leaseActivationJobSchema.parse(job.data);
-    return activateScheduledLease(prisma, organizationId, leaseId);
+    try {
+      return await activateScheduledLease(prisma, organizationId, leaseId);
+    } catch (error) {
+      if (isFinalLeaseJobAttempt(job.attemptsMade, job.opts.attempts)) {
+        await recordLeaseLifecycleFailure(prisma, organizationId, leaseId, "lease.activation_failed", error).catch(
+          (recordError) =>
+            console.error(`[parcelis] Could not record activation failure for lease ${leaseId}:`, recordError),
+        );
+      }
+      throw error;
+    }
   },
   { connection: redisConnection },
 );
@@ -89,7 +127,7 @@ await leaseActivationWorker.waitUntilReady();
 
 console.info(`[parcelis] Worker connected to Redis for ${queues.length} queues.`);
 const stopOutboxDispatcher = startOutboxDispatcher(prisma, queueByName);
-const stopLeaseActivationReconciler = startLeaseActivationReconciler(prisma);
+const stopLeaseReconciler = startLeaseReconciler(prisma, queueRegistry.leasingNotifications);
 
 let isShuttingDown = false;
 
@@ -108,7 +146,7 @@ async function shutdown(signal: NodeJS.Signals) {
 
   try {
     await stopOutboxDispatcher();
-    await stopLeaseActivationReconciler();
+    await stopLeaseReconciler();
     await notificationEmailWorker.close();
     await leaseActivationWorker.close();
     await Promise.allSettled(queues.map((queue) => queue.close()));
