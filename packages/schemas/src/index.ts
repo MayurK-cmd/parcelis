@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+export * from "./lease-rent-schedule.ts";
+
 export const sessionStatusSchema = z.object({
   expiresAt: z.number(),
   serverTime: z.number(),
