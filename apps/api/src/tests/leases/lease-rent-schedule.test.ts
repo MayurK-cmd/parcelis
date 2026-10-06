@@ -1,6 +1,82 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { calculateMonthlyRentSchedule, planMonthlyRentCharges } from "@parcelis/schemas";
+import { calculateMonthlyRentSchedule, planLeaseRentCharges, planMonthlyRentCharges } from "@parcelis/schemas";
+
+test("an open-ended lease plans twelve initial calendar months", () => {
+  const charges = planLeaseRentCharges({
+    monthlyRentCents: 120_000,
+    rentDueDay: 1,
+    startsOn: "2027-04-16",
+    endsOn: null,
+    billingResponsibility: "joint",
+    tenantIds: [11],
+    tenantAllocations: [],
+  });
+
+  assert.equal(charges.length, 12);
+  assert.equal(charges[0]?.periodStartsOn, "2027-04-16");
+  assert.equal(charges.at(-1)?.periodEndsOn, "2028-03-31");
+});
+
+test("a fixed lease longer than 120 calendar months is rejected", () => {
+  assert.throws(
+    () =>
+      planLeaseRentCharges({
+        monthlyRentCents: 120_000,
+        rentDueDay: 1,
+        startsOn: "2027-01-01",
+        endsOn: "2037-01-01",
+        billingResponsibility: "joint",
+        tenantIds: [11],
+        tenantAllocations: [],
+      }),
+    /cannot exceed 120 months/,
+  );
+});
+
+test("a fixed lease spanning exactly 120 calendar months plans every charge", () => {
+  const charges = planLeaseRentCharges({
+    monthlyRentCents: 120_000,
+    rentDueDay: 1,
+    startsOn: "2027-01-01",
+    endsOn: "2036-12-31",
+    billingResponsibility: "joint",
+    tenantIds: [11],
+    tenantAllocations: [],
+  });
+
+  assert.equal(charges.length, 120);
+  assert.equal(charges[0]?.sourceKey, "rent:2027-01:joint");
+  assert.equal(charges.at(-1)?.sourceKey, "rent:2036-12:joint");
+});
+
+test("a full lease plan includes every monthly joint rent charge", () => {
+  const charges = planLeaseRentCharges({
+    monthlyRentCents: 120_000,
+    rentDueDay: 1,
+    startsOn: "2027-01-01",
+    endsOn: "2027-12-31",
+    billingResponsibility: "joint",
+    tenantIds: [12, 11],
+    tenantAllocations: [],
+  });
+
+  assert.equal(charges.length, 12);
+  assert.equal(
+    charges.reduce((total, charge) => total + charge.amountCents, 0),
+    1_440_000,
+  );
+  assert.deepEqual(charges[0], {
+    sourceKey: "rent:2027-01:joint",
+    periodStartsOn: "2027-01-01",
+    periodEndsOn: "2027-01-31",
+    dueOn: "2027-01-01",
+    amountCents: 120_000,
+    primaryTenantId: 11,
+    recipientTenantIds: [11, 12],
+  });
+  assert.equal(charges.at(-1)?.sourceKey, "rent:2027-12:joint");
+});
 
 test("a January through December lease creates twelve monthly rent periods", () => {
   const schedule = calculateMonthlyRentSchedule({

@@ -66,6 +66,7 @@ import {
   leasePropertyStepSchema,
   leaseTenantBillingStepSchema,
   leaseTermsStepSchema,
+  planLeaseRentCharges,
   type CreatePropertyInput,
 } from "@parcelis/schemas";
 import { apiClient, queryKeys } from "../../../../components/api-client";
@@ -1408,6 +1409,36 @@ function LeaseReviewPropertyAndUnit({
     .map((tenantId) => tenantsQuery.data?.find((tenant) => tenant.id === tenantId))
     .filter((tenant): tenant is NonNullable<typeof tenant> => Boolean(tenant));
   const allocationsByTenantId = new Map(tenantAllocations.map((allocation) => [allocation.tenantId, allocation]));
+  const rentPreview = (() => {
+    if (monthlyRentCents === null || !startsOn || (termType === "fixed" && !endsOn) || tenantIds.length === 0) {
+      return { error: "Complete the lease terms and residents to preview rent invoices." } as const;
+    }
+    try {
+      const charges = planLeaseRentCharges({
+        monthlyRentCents,
+        rentDueDay,
+        startsOn,
+        endsOn: termType === "fixed" ? endsOn : null,
+        billingResponsibility,
+        tenantIds,
+        tenantAllocations:
+          billingResponsibility === "individual"
+            ? synchronizeTenantAllocations(tenantIds, tenantAllocations).map(({ tenantId, rentShareCents }) => ({
+                tenantId,
+                rentShareCents,
+              }))
+            : [],
+      });
+      return {
+        charges,
+        invoiceCount: charges.length,
+        periodCount: new Set(charges.map(({ periodStartsOn }) => periodStartsOn.slice(0, 7))).size,
+        rentTotalCents: charges.reduce((total, charge) => total + charge.amountCents, 0),
+      } as const;
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : "Unable to preview rent invoices." } as const;
+    }
+  })();
 
   if (propertiesQuery.isLoading || tenantsQuery.isLoading) return <LoadingState label="Loading lease details" />;
 
@@ -1552,13 +1583,50 @@ function LeaseReviewPropertyAndUnit({
         <ReviewSectionHeader onEdit={() => onEdit("residents")} title="Billing" />
         <div className="flex flex-col gap-4 p-4 md:flex-row">
           <ReviewDetail label="Partial payments" value={allowPartialPayments ? "Allowed" : "Not allowed"} />
-          <div className="flex flex-1 flex-col gap-1 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
+          <div className="flex min-w-0 flex-1 flex-col gap-1 rounded-md bg-parcelis-porcelain/60 p-4 dark:bg-parcelis-charcoal/55">
             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-parcelis-gray dark:text-white/65">
-              Rent invoices
+              Rental invoices
             </p>
-            <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">No invoices generated</p>
-            <p className="mt-1 text-sm leading-6 text-parcelis-gray dark:text-white/65">
-              Create rent invoices separately when needed.
+            {"error" in rentPreview ? (
+              <p className="mt-1 text-sm text-parcelis-gray dark:text-white/65">{rentPreview.error}</p>
+            ) : (
+              <>
+                <p className="mt-1 font-semibold text-parcelis-charcoal dark:text-white">
+                  {rentPreview.invoiceCount} invoices planned · {formatCurrencyExact(rentPreview.rentTotalCents)} total
+                </p>
+                <p className="text-sm text-parcelis-gray dark:text-white/65">
+                  {rentPreview.periodCount} billing months
+                </p>
+                <div className="mt-2 max-h-80 overflow-y-auto rounded-md border border-parcelis-border bg-white dark:bg-parcelis-charcoal">
+                  <Table>
+                    <TableHeader className="bg-parcelis-porcelain text-xs uppercase text-parcelis-gray dark:bg-parcelis-slate dark:text-white/65">
+                      <TableRow>
+                        <TableHead className="h-10 px-3">Invoice</TableHead>
+                        <TableHead className="h-10 px-3 text-right">Amount</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {rentPreview.charges.map((charge) => (
+                        <TableRow key={charge.sourceKey}>
+                          <TableCell className="px-3 py-2 font-medium text-parcelis-charcoal dark:text-white">
+                            {formatDateLabel(parseDateInput(charge.dueOn)!)}
+                          </TableCell>
+                          <TableCell className="px-3 py-2 text-right font-medium text-parcelis-charcoal dark:text-white">
+                            {formatCurrencyExact(charge.amountCents)}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+                <p className="mt-2 text-sm text-parcelis-gray dark:text-white/65">
+                  {termType === "fixed" ? "Full lease term" : "First 12 calendar months"}. Partial months are prorated.
+                </p>
+              </>
+            )}
+            <p className="mt-2 text-sm text-parcelis-gray dark:text-white/65">
+              Security deposit {formatCurrencyExact(securityDepositCents ?? 0)} is separate and not included in the rent
+              total.
             </p>
           </div>
         </div>
@@ -2094,11 +2162,16 @@ function NewLeasePageContent() {
       await goNext();
       return;
     }
-    if (finalizeLeaseDraft.isPending || !draftIdentity.leaseId) return;
-    if (!(await flushDraftSave())) {
-      setStepError("Save the current changes before creating the lease.");
+    if (finalizeLeaseDraft.isPending) return;
+    if (!draftIdentity.leaseId) {
+      setStepError("The lease draft is not ready. Reload it and try again.");
       return;
     }
+    if (!(await flushDraftSave())) {
+      setStepError("Save the current changes before finalizing the lease.");
+      return;
+    }
+    setStepError(null);
     try {
       const lease = await finalizeLeaseDraft.mutateAsync({
         leaseId: draftIdentity.leaseId,
@@ -2112,7 +2185,7 @@ function NewLeasePageContent() {
       ]);
       router.push(getLeaseLink(lease.id));
     } catch (error) {
-      setStepError(error instanceof Error ? error.message : "Unable to create the lease.");
+      setStepError(error instanceof Error ? error.message : "Unable to finalize the lease.");
     }
   }
 
@@ -2461,13 +2534,6 @@ function NewLeasePageContent() {
                     />
                   ) : currentIndex === 3 ? (
                     <>
-                      {currentStepError ? (
-                        <Alert className="mx-5 mt-5 md:mx-6" variant="destructive">
-                          <TriangleAlert className="h-4 w-4" />
-                          <AlertTitle>Unable to create lease</AlertTitle>
-                          <AlertDescription>{currentStepError}</AlertDescription>
-                        </Alert>
-                      ) : null}
                       <LeaseReviewPropertyAndUnit
                         allowPartialPayments={draft.allowPartialPayments}
                         billingResponsibility={draft.billingResponsibility}
@@ -2499,32 +2565,41 @@ function NewLeasePageContent() {
                     </>
                   )}
                 </CardContent>
-                <div className="flex items-center justify-between border-t border-parcelis-border p-4 md:px-6">
-                  {currentIndex === 0 ? (
-                    <Button asChild className="min-w-40" variant="secondary">
-                      <Link href="/leases" onClick={preventUnsafeExit}>
-                        Cancel
-                      </Link>
+                <div className="border-t border-parcelis-border p-4 md:px-6">
+                  {isLastStep && currentStepError ? (
+                    <Alert className="mb-4" role="alert" variant="destructive">
+                      <TriangleAlert className="h-4 w-4" />
+                      <AlertTitle>Unable to finalize lease</AlertTitle>
+                      <AlertDescription>{currentStepError}</AlertDescription>
+                    </Alert>
+                  ) : null}
+                  <div className="flex items-center justify-between">
+                    {currentIndex === 0 ? (
+                      <Button asChild className="min-w-40" variant="secondary">
+                        <Link href="/leases" onClick={preventUnsafeExit}>
+                          Cancel
+                        </Link>
+                      </Button>
+                    ) : (
+                      <Button className="min-w-40" onClick={goBack} type="button" variant="secondary">
+                        Back
+                      </Button>
+                    )}
+                    <Button
+                      className="min-w-40"
+                      disabled={
+                        finalizeLeaseDraft.isPending ||
+                        createLeaseDraft.isPending ||
+                        isSelectingUnit ||
+                        Boolean(existingUnitDraft) ||
+                        (currentIndex === 0 && draft.unitId === null)
+                      }
+                      type="submit"
+                    >
+                      {isLastStep ? "Finalize lease" : "Next"}
+                      {!isLastStep ? <ChevronRight className="h-4 w-4" /> : null}
                     </Button>
-                  ) : (
-                    <Button className="min-w-40" onClick={goBack} type="button" variant="secondary">
-                      Back
-                    </Button>
-                  )}
-                  <Button
-                    className="min-w-40"
-                    disabled={
-                      finalizeLeaseDraft.isPending ||
-                      createLeaseDraft.isPending ||
-                      isSelectingUnit ||
-                      Boolean(existingUnitDraft) ||
-                      (currentIndex === 0 && draft.unitId === null)
-                    }
-                    type="submit"
-                  >
-                    {isLastStep ? "Create lease" : "Next"}
-                    {!isLastStep ? <ChevronRight className="h-4 w-4" /> : null}
-                  </Button>
+                  </div>
                 </div>
               </Card>
             </form>

@@ -36,6 +36,10 @@ export type MonthlyRentChargePlan = {
   recipientTenantIds: number[];
 };
 
+// Input for calculating the combined lease rent plan, which includes both the schedule and billing information.
+export type LeaseRentPlanInput = Omit<MonthlyRentScheduleInput, "endsOn"> &
+  MonthlyRentBillingInput & { endsOn: string | null };
+
 // Helper function to determine the number of days in a given
 // month of a specific year.
 function daysInMonth(year: number, month: number) {
@@ -84,7 +88,7 @@ export function calculateMonthlyRentSchedule({
     throw new Error("Lease start and end dates must be in different calendar months.");
   }
 
-  // Initialize the rent schedule array and set the 
+  // Initialize the rent schedule array and set the
   // starting year and month.
   const schedule: MonthlyRentSchedulePeriod[] = [];
   let year = start.year;
@@ -129,7 +133,7 @@ export function calculateMonthlyRentSchedule({
   return schedule;
 }
 
-// Plans the monthly rent charges for a given rent 
+// Plans the monthly rent charges for a given rent
 // schedule period based on the billing input.
 export function planMonthlyRentCharges(
   period: MonthlyRentSchedulePeriod,
@@ -206,4 +210,22 @@ export function planMonthlyRentCharges(
     primaryTenantId: tenantId,
     recipientTenantIds: [tenantId],
   }));
+}
+
+// Lease planner
+// Plans the lease rent charges based on the calculated monthly rent schedule.
+export function planLeaseRentCharges(input: LeaseRentPlanInput): MonthlyRentChargePlan[] {
+  const start = parseCalendarDate(input.startsOn);
+  let endsOn = input.endsOn;
+  if (endsOn === null) {
+    const finalMonthIndex = start.year * 12 + start.month - 1 + 11;
+    const year = Math.floor(finalMonthIndex / 12);
+    const month = (finalMonthIndex % 12) + 1;
+    endsOn = formatCalendarDate(year, month, daysInMonth(year, month));
+  } else {
+    const end = parseCalendarDate(endsOn);
+    const periodCount = (end.year - start.year) * 12 + end.month - start.month + 1;
+    if (periodCount > 120) throw new Error("Lease rent schedule cannot exceed 120 months.");
+  }
+  return calculateMonthlyRentSchedule({ ...input, endsOn }).flatMap((period) => planMonthlyRentCharges(period, input));
 }
