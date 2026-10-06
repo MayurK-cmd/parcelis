@@ -4,7 +4,7 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Building2, ChevronRight, DoorOpen, Filter, Plus, Search } from "lucide-react";
+import { ChevronRight, DoorOpen, Filter, Plus, Search } from "lucide-react";
 import {
   Button,
   Card,
@@ -70,8 +70,29 @@ function formatInvoiceStatus(invoice: { amountCents: number; balanceCents: numbe
   return formatLeaseStatus(invoice.status);
 }
 
-function getTenantName(lease: { tenant: { firstName: string; lastName: string } }) {
-  return `${lease.tenant.firstName} ${lease.tenant.lastName}`;
+function isUpcomingInvoice(invoice: { balanceCents: number; dueOn: Date | string }) {
+  const dueOn = new Date(invoice.dueOn);
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  return invoice.balanceCents > 0 && dueOn > today;
+}
+
+function getIncomeInvoiceStatus(invoice: {
+  amountCents: number;
+  balanceCents: number;
+  dueOn: Date | string;
+  status: string;
+}) {
+  if (isUpcomingInvoice(invoice)) return "Upcoming";
+  return formatInvoiceStatus(invoice);
+}
+
+function getTenantName(lease: {
+  tenant: { firstName: string; lastName: string };
+  tenants?: Array<{ firstName: string; lastName: string }>;
+}) {
+  const tenants = lease.tenants?.length ? lease.tenants : [lease.tenant];
+  return tenants.map((tenant) => `${tenant.firstName} ${tenant.lastName}`).join(", ");
 }
 
 function parseEntityId(value: string | null) {
@@ -92,8 +113,8 @@ export default function IncomePage() {
 }
 
 function IncomePageContent() {
-  const [expandedPropertyIds, setExpandedPropertyIds] = React.useState<Set<number>>(new Set());
-  const [groupByProperty, setGroupByProperty] = React.useState(true);
+  const [expandedUnitIds, setExpandedUnitIds] = React.useState<Set<string>>(new Set());
+  const [groupByUnit, setGroupByUnit] = React.useState(true);
   const [search, setSearch] = React.useState("");
   const [isInvoiceDrawerOpen, setIsInvoiceDrawerOpen] = React.useState(false);
   const [isFilterOpen, setIsFilterOpen] = React.useState(false);
@@ -119,8 +140,11 @@ function IncomePageContent() {
     },
   });
   const isEligibleIncomeLease = (lease: (typeof properties)[number]["leases"][number]) =>
+    (lease.status === "active" || lease.status === "notice" || lease.status === "scheduled") &&
+    (selectedTenantId === null || lease.tenants.some((tenant) => tenant.id === selectedTenantId));
+  const isSummaryLease = (lease: (typeof properties)[number]["leases"][number]) =>
     (lease.status === "active" || lease.status === "notice") &&
-    (selectedTenantId === null || lease.tenant.id === selectedTenantId);
+    (selectedTenantId === null || lease.tenants.some((tenant) => tenant.id === selectedTenantId));
   const unitFilterOptions = properties
     .map((property) => {
       const eligibleUnitIds = new Set(property.leases.filter(isEligibleIncomeLease).map((lease) => lease.unitId));
@@ -132,11 +156,21 @@ function IncomePageContent() {
       const incomeLeases = property.leases.filter(
         (lease) => isEligibleIncomeLease(lease) && (selectedUnitId === null || lease.unitId === selectedUnitId),
       );
+      const summaryLeases = incomeLeases.filter(isSummaryLease);
       return {
         ...property,
         incomeLeases,
-        amountOverdueCents: incomeLeases.reduce((total, lease) => total + lease.amountOverdueCents, 0),
-        monthlyRentCents: incomeLeases.reduce((total, lease) => total + (lease.monthlyRentCents ?? 0), 0),
+        amountOverdueCents: summaryLeases.reduce(
+          (total, lease) =>
+            total +
+            lease.invoices.reduce(
+              (leaseTotal, invoice) =>
+                leaseTotal + (invoice.status === "overdue" ? invoice.balanceCents : 0),
+              0,
+            ),
+          0,
+        ),
+        monthlyRentCents: summaryLeases.reduce((total, lease) => total + (lease.monthlyRentCents ?? 0), 0),
       };
     })
     .filter((property) => property.incomeLeases.length > 0);
@@ -157,8 +191,30 @@ function IncomePageContent() {
   const incomeLeases = filteredIncomeProperties.flatMap((property) =>
     property.incomeLeases.map((lease) => ({ property, lease })),
   );
+  const unitGroups = new Map<
+    string,
+    {
+      id: string;
+      property: (typeof incomeProperties)[number];
+      unitLabel: string;
+      incomeLeases: Array<(typeof incomeLeases)[number]["lease"]>;
+    }
+  >();
+  for (const { property, lease } of incomeLeases) {
+    const id = `${property.id}:${lease.unitId}`;
+    const group = unitGroups.get(id) ?? {
+      id,
+      property,
+      unitLabel: lease.unitLabel,
+      incomeLeases: [],
+    };
+    group.incomeLeases.push(lease);
+    unitGroups.set(id, group);
+  }
+  const filteredUnitGroups = Array.from(unitGroups.values());
   const ungroupedIncomeRows = incomeLeases.flatMap(({ property, lease }) => {
     const persistedInvoices = getLeaseInvoices(lease);
+    if (lease.status === "scheduled" && persistedInvoices.length === 0) return [];
     return (persistedInvoices.length ? persistedInvoices : [null]).map((persistedInvoice) => ({
       property,
       lease,
@@ -176,11 +232,13 @@ function IncomePageContent() {
     setIsFilterOpen(false);
   }
 
-  function toggleProperty(propertyId: number) {
-    setExpandedPropertyIds((current) => {
+  // Toggle the expanded state of a unit in the income dashboard.
+  function toggleUnit(unitId: string) {
+    setExpandedUnitIds((current) => {
       const next = new Set(current);
-      if (next.has(propertyId)) next.delete(propertyId);
-      else next.add(propertyId);
+      // If the unit is already expanded, collapse it; otherwise, expand it.
+      if (next.has(unitId)) next.delete(unitId);
+      else next.add(unitId);
       return next;
     });
   }
@@ -225,12 +283,12 @@ function IncomePageContent() {
               <div className="relative flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div>
                   <h2 className="font-semibold text-parcelis-charcoal">
-                    {groupByProperty ? "Income by property" : "Income rent roll"}
+                    {groupByUnit ? "Income by unit" : "Income rent roll"}
                   </h2>
                   <p className="mt-1 text-sm text-parcelis-gray">
-                    {groupByProperty
-                      ? "Active and notice-period leases, grouped by property."
-                      : "Active and notice-period leases listed by property and unit."}
+                    {groupByUnit
+                      ? "Scheduled, active, and notice-period leases, grouped by unit."
+                      : "Scheduled, active, and notice-period leases listed by property and unit."}
                   </p>
                 </div>
                 <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -255,8 +313,8 @@ function IncomePageContent() {
                     Filters
                     {selectedUnitId !== null ? " (1)" : ""}
                   </Button>
-                  <Button onClick={() => setGroupByProperty((grouped) => !grouped)} type="button" variant="secondary">
-                    {groupByProperty ? "Grouped By Property" : " Not Grouped"}
+                  <Button onClick={() => setGroupByUnit((grouped) => !grouped)} type="button" variant="secondary">
+                    {groupByUnit ? "Grouped By Unit" : " Not Grouped"}
                   </Button>
                 </div>
                 {isFilterOpen ? (
@@ -302,16 +360,16 @@ function IncomePageContent() {
               ) : filteredIncomeProperties.length === 0 ? (
                 <div className="min-h-48 p-5 text-sm text-parcelis-gray">
                   {selectedUnitId !== null && incomeProperties.length === 0
-                    ? "No active leases for the selected unit."
+                  ? "No income leases for the selected unit."
                     : incomeProperties.length === 0
-                      ? "No active leases are available to report income yet."
+                      ? "No income leases are available to report income yet."
                       : "No income records match your search."}
                 </div>
-              ) : groupByProperty ? (
+              ) : groupByUnit ? (
                 <Table className="min-w-[1360px] border-collapse text-left">
                   <TableHeader className="bg-parcelis-porcelain text-xs uppercase text-parcelis-gray">
                     <TableRow className="border-0">
-                      <TableHead className="w-[28%] px-5 py-3 font-semibold">Property / Tenant</TableHead>
+                      <TableHead className="w-[28%] px-5 py-3 font-semibold">Unit / Property</TableHead>
                       <TableHead className="px-5 py-3 font-semibold">Unit</TableHead>
                       <TableHead className="px-5 py-3 font-semibold">Due on</TableHead>
                       <TableHead className="px-5 py-3 font-semibold">Paid on</TableHead>
@@ -324,15 +382,27 @@ function IncomePageContent() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {filteredIncomeProperties.map((property) => {
-                      const isExpanded = expandedPropertyIds.has(property.id);
+                    {filteredUnitGroups.map((group) => {
+                      const isExpanded = expandedUnitIds.has(group.id);
+                      const invoiceRows: Array<Pick<ReturnType<typeof getCurrentInvoice>, "amountCents" | "balanceCents">> = [];
+                      for (const lease of group.incomeLeases) {
+                        const persistedInvoices = getLeaseInvoices(lease);
+                        if (persistedInvoices.length > 0) invoiceRows.push(...persistedInvoices);
+                        else if (lease.status !== "scheduled") invoiceRows.push(getCurrentInvoice(lease));
+                      }
+                      const amountCents = invoiceRows.reduce((total, invoice) => total + invoice.amountCents, 0);
+                      const paidCents = invoiceRows.reduce(
+                        (total, invoice) => total + invoice.amountCents - invoice.balanceCents,
+                        0,
+                      );
+                      const balanceCents = invoiceRows.reduce((total, invoice) => total + invoice.balanceCents, 0);
                       return (
-                        <React.Fragment key={property.id}>
+                        <React.Fragment key={group.id}>
                           <TableRow className="border-t border-parcelis-border hover:bg-parcelis-porcelain/60">
                             <TableCell className="px-5 py-4">
                               <button
                                 className="flex items-center gap-3 font-semibold text-parcelis-charcoal"
-                                onClick={() => toggleProperty(property.id)}
+                                onClick={() => toggleUnit(group.id)}
                                 type="button"
                               >
                                 <span className="grid h-8 w-8 place-items-center rounded-md border border-parcelis-border">
@@ -340,34 +410,34 @@ function IncomePageContent() {
                                     className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-90" : ""}`}
                                   />
                                 </span>
-                                <Building2 className="h-4 w-4 text-parcelis-green" />
-                                {property.name}
-                                <span className="text-sm font-medium text-parcelis-gray">
-                                  ({property.incomeLeases.length})
-                                </span>
+                                <DoorOpen className="h-4 w-4 text-parcelis-green" />
+                                Unit {group.unitLabel} · {group.property.name}
                               </button>
                             </TableCell>
-                            <TableCell className="px-5 py-4 text-parcelis-gray">—</TableCell>
+                            <TableCell className="px-5 py-4 text-parcelis-gray">Unit {group.unitLabel}</TableCell>
                             <TableCell className="px-5 py-4 text-parcelis-gray">—</TableCell>
                             <TableCell className="px-5 py-4 text-parcelis-gray">—</TableCell>
                             <TableCell className="px-5 py-4 text-parcelis-gray">—</TableCell>
                             <TableCell className="px-5 py-4 text-parcelis-gray">—</TableCell>
                             <TableCell className="px-5 py-4 text-right font-semibold text-parcelis-charcoal">
-                              {formatCurrency(property.monthlyRentCents)}
+                              {formatCurrency(amountCents)}
                             </TableCell>
                             <TableCell className="px-5 py-4 text-right text-parcelis-gray">—</TableCell>
-                            <TableCell className="px-5 py-4 text-right text-parcelis-gray">—</TableCell>
+                            <TableCell className="px-5 py-4 text-right text-parcelis-gray">
+                              {formatCurrency(paidCents)}
+                            </TableCell>
                             <TableCell
-                              className={`px-5 py-4 text-right font-semibold ${property.amountOverdueCents ? "text-red-700" : "text-parcelis-gray"}`}
+                              className={`px-5 py-4 text-right font-semibold ${balanceCents ? "text-parcelis-charcoal" : "text-parcelis-gray"}`}
                             >
-                              {formatCurrency(property.amountOverdueCents)}
+                              {formatCurrency(balanceCents)}
                             </TableCell>
                           </TableRow>
                           {isExpanded
-                            ? property.incomeLeases.map((lease) => {
+                            ? group.incomeLeases.map((lease) => {
                                 const tenantName = getTenantName(lease);
                                 const persistedInvoices = getLeaseInvoices(lease);
-                                const invoices = persistedInvoices.length ? persistedInvoices : [null];
+                                const invoices =
+                                  persistedInvoices.length || lease.status === "scheduled" ? persistedInvoices : [null];
                                 return invoices.map((persistedInvoice) => {
                                   const invoice = persistedInvoice ?? getCurrentInvoice(lease);
                                   return (
@@ -389,7 +459,14 @@ function IncomePageContent() {
                                       <TableCell className="px-5 py-3">
                                         <div className="grid grid-cols-[2rem_minmax(0,1fr)] items-center gap-3 font-semibold text-parcelis-charcoal">
                                           <span />
-                                          {tenantName}
+                                          <span className="flex items-center gap-2">
+                                            {tenantName}
+                                            {lease.status === "scheduled" ? (
+                                              <span className="text-xs font-medium text-parcelis-gray">
+                                                Scheduled lease
+                                              </span>
+                                            ) : null}
+                                          </span>
                                         </div>
                                       </TableCell>
                                       <TableCell className="px-5 py-3">
@@ -417,7 +494,9 @@ function IncomePageContent() {
                                         )}
                                       </TableCell>
                                       <TableCell className="px-5 py-3 text-sm text-parcelis-gray">
-                                        {persistedInvoice ? formatInvoiceStatus(persistedInvoice) : invoice.status}
+                                        {persistedInvoice
+                                          ? getIncomeInvoiceStatus(persistedInvoice)
+                                          : invoice.status}
                                       </TableCell>
                                       <TableCell className="px-5 py-3 text-right text-sm font-semibold text-parcelis-charcoal">
                                         {formatCurrency(
@@ -428,16 +507,12 @@ function IncomePageContent() {
                                         —
                                       </TableCell>
                                       <TableCell className="px-5 py-3 text-right text-sm text-parcelis-gray">
-                                        {persistedInvoice
-                                          ? formatCurrency(persistedInvoice.amountCents - persistedInvoice.balanceCents)
-                                          : "—"}
+                                        {formatCurrency(invoice.amountCents - invoice.balanceCents)}
                                       </TableCell>
                                       <TableCell
-                                        className={`px-5 py-3 text-right text-sm font-semibold ${lease.amountOverdueCents ? "text-red-700" : "text-parcelis-gray"}`}
+                                        className={`px-5 py-3 text-right text-sm font-semibold ${persistedInvoice && isUpcomingInvoice(persistedInvoice) ? "text-parcelis-gray" : lease.amountOverdueCents ? "text-red-700" : "text-parcelis-gray"}`}
                                       >
-                                        {formatCurrency(
-                                          persistedInvoice ? persistedInvoice.balanceCents : lease.amountOverdueCents,
-                                        )}
+                                        {formatCurrency(invoice.balanceCents)}
                                       </TableCell>
                                     </TableRow>
                                   );
@@ -488,6 +563,7 @@ function IncomePageContent() {
                               <p className="font-semibold text-parcelis-charcoal">{property.name}</p>
                               <p className="text-sm text-parcelis-gray">
                                 Unit {lease.unitLabel} · {getTenantName(lease)}
+                                {lease.status === "scheduled" ? " · Scheduled lease" : ""}
                               </p>
                             </div>
                           </TableCell>
@@ -520,12 +596,12 @@ function IncomePageContent() {
                             {formatCurrency(invoice.amountCents - invoice.balanceCents)}
                           </TableCell>
                           <TableCell
-                            className={`px-5 py-4 text-right text-sm font-semibold ${invoice.balanceCents ? "text-red-700" : "text-parcelis-gray"}`}
+                            className={`px-5 py-4 text-right text-sm font-semibold ${persistedInvoice && isUpcomingInvoice(persistedInvoice) ? "text-parcelis-gray" : invoice.balanceCents ? "text-red-700" : "text-parcelis-gray"}`}
                           >
                             {formatCurrency(invoice.balanceCents)}
                           </TableCell>
                           <TableCell className="px-5 py-4 text-sm text-parcelis-gray">
-                            {formatInvoiceStatus(invoice)}
+                            {persistedInvoice ? getIncomeInvoiceStatus(persistedInvoice) : formatInvoiceStatus(invoice)}
                           </TableCell>
                         </TableRow>
                       );
