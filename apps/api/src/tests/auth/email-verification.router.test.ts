@@ -74,6 +74,7 @@ function createPrisma() {
   const passwordResetTokens: PasswordResetToken[] = [];
   const sessions: Array<{ userId: number }> = [];
   const organizationMemberships: OrganizationMembership[] = [];
+  const invoiceCharges: Array<{ organizationId: number; name: string; description: string | null; isDefault: boolean }> = [];
   const outboxEvents: OutboxEvent[] = [];
   const notificationDeliveries: NotificationDelivery[] = [];
   const transactions: Promise<unknown>[] = [];
@@ -119,6 +120,12 @@ function createPrisma() {
     },
     organization: {
       create: async () => ({ id: nextOrganizationId++ }),
+    },
+    invoiceCharge: {
+      create: async ({ data }: { data: (typeof invoiceCharges)[number] }) => {
+        invoiceCharges.push(data);
+        return { ...data, id: invoiceCharges.length };
+      },
     },
     organizationMembership: {
       create: async ({ data }: { data: OrganizationMembership }) => {
@@ -279,6 +286,7 @@ function createPrisma() {
   } as unknown as PrismaService;
 
   return {
+    invoiceCharges,
     organizationMemberships,
     outboxEvents,
     passwordResetTokens,
@@ -366,6 +374,14 @@ test("registration creates a pending account and one verification token without 
   await caller.auth.register({ email: "new@example.com", password: "password-for-new-user" });
 
   assert.equal(state.users[0]?.accountStatus, "pending");
+  assert.deepEqual(state.invoiceCharges, [
+    {
+      organizationId: 1,
+      name: "Rent",
+      description: "Monthly rent for {month} {year}",
+      isDefault: true,
+    },
+  ]);
   assert.equal(state.tokens.length, 1);
   assert.notEqual(state.tokens[0]?.tokenHash, "new@example.com");
   assert.equal(state.sessions.length, 0);
