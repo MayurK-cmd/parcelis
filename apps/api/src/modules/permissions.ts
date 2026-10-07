@@ -1,5 +1,7 @@
 import { TRPCError } from "@trpc/server";
 import {
+  getFeatureFlags,
+  isApplicationResource,
   permissionActionValues,
   permissionResourceValues,
   supportsPermissionAction,
@@ -38,6 +40,10 @@ export function requireAdministrator(role: string) {
   }
 }
 
+export function isPermissionResourceEnabled(resource: PermissionResource) {
+  return !isApplicationResource(resource) || getFeatureFlags(process.env).applications;
+}
+
 export async function getRolePermissions(prisma: PrismaService, role: string) {
   const userRole = getUserRole(role);
   const rows = userRole === "administrator" ? [] : await prisma.rolePermission.findMany({ where: { role: userRole } });
@@ -45,13 +51,14 @@ export async function getRolePermissions(prisma: PrismaService, role: string) {
   return Object.fromEntries(
     permissionResourceValues.map((resource) => {
       const row = rows.find((permission) => permission.resource === resource);
+      const resourceEnabled = isPermissionResourceEnabled(resource);
       const enabled = userRole === "administrator";
       return [
         resource,
         Object.fromEntries(
           permissionActionValues.flatMap((action) =>
             supportsPermissionAction(resource, action)
-              ? [[action, enabled || Boolean(row?.[actionFields[action]])]]
+              ? [[action, resourceEnabled && (enabled || Boolean(row?.[actionFields[action]]))]]
               : [],
           ),
         ) as PermissionFlags,
@@ -66,6 +73,9 @@ export async function requirePermission(
   resource: PermissionResource,
   action: PermissionAction,
 ) {
+  if (!isPermissionResourceEnabled(resource)) {
+    throw new TRPCError({ code: "FORBIDDEN", message: "Applications are disabled." });
+  }
   if (!supportsPermissionAction(resource, action)) {
     const resourceLabel = resource.replaceAll("_", " ");
     throw new TRPCError({
