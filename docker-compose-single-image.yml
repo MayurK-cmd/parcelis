@@ -1,10 +1,10 @@
 # Single application image Compose example.
 #
-# Runs the published `parcelis/all` image, which bundles the Parcelis web app,
-# API, documentation site, and nginx edge routing into one application image.
-# This is not a single-container deployment: PostgreSQL and S3-compatible
-# object storage (MinIO is provided here) remain separate services that you
-# can replace with managed equivalents.
+# Runs the published `parcelis/parcelis` image, which bundles the Parcelis web
+# app, API, worker, documentation site, and nginx edge routing into one
+# application image. This is not a single-container deployment: PostgreSQL,
+# Redis, and S3-compatible object storage (MinIO is provided here) remain
+# separate services that you can replace with managed equivalents.
 #
 # This file does not modify the modular `docker-compose.yml` stack. Use it
 # when you want a single runtime image and one exposed application port.
@@ -13,7 +13,7 @@
 #
 #   cp .env.production.example .env.production
 #   # edit .env.production with your production values
-#   docker compose --env-file .env.production -f docker-compose.all-in-one.yml up -d --remove-orphans
+#   docker compose --env-file .env.production -f docker-compose-single-image.yml up -d --remove-orphans
 
 name: parcelis-all-in-one
 
@@ -29,6 +29,22 @@ services:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - parcelis
+
+  redis-service:
+    image: redis:8-alpine
+    container_name: parcelis-all-in-one-redis
+    command: ["/bin/sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping']
       interval: 5s
       timeout: 5s
       retries: 10
@@ -76,7 +92,7 @@ services:
       - parcelis
 
   migrate-service:
-    image: parcelis/all:${PARCELIS_VERSION:-v0.4.1}
+    image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
     container_name: parcelis-all-in-one-migrate
     command: pnpm --filter @parcelis/db exec prisma migrate deploy --schema prisma/schema.prisma
     working_dir: /repo
@@ -89,7 +105,7 @@ services:
       - parcelis
 
   app-service:
-    image: parcelis/all:${PARCELIS_VERSION:-v0.4.1}
+    image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
     container_name: parcelis-all-in-one-app
     ports:
       - "${APP_PORT:-3000}:3000"
@@ -112,6 +128,9 @@ services:
       S3_BUCKET: ${S3_BUCKET}
       S3_ACCESS_KEY_ID: ${MINIO_ROOT_USER}
       S3_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD}
+      REDIS_HOST: redis-service
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
     depends_on:
       migrate-service:
         condition: service_completed_successfully
@@ -126,8 +145,33 @@ services:
       retries: 3
       start_period: 60s
 
+  worker-service:
+    image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
+    container_name: parcelis-all-in-one-worker
+    command: pnpm --filter @parcelis/worker start
+    environment:
+      EMAIL_FROM: ${EMAIL_FROM}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_SECURE: ${SMTP_SECURE}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      EMAIL_SETTINGS_ENCRYPTION_KEY: ${EMAIL_SETTINGS_ENCRYPTION_KEY}
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-service:5432/${POSTGRES_DB}?schema=public
+      REDIS_HOST: redis-service
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
+    depends_on:
+      migrate-service:
+        condition: service_completed_successfully
+      redis-service:
+        condition: service_healthy
+    networks:
+      - parcelis
+
 volumes:
   postgres-data:
+  redis-data:
   minio-data:
 
 networks:

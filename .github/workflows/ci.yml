@@ -71,17 +71,23 @@ jobs:
           context: .
           file: Dockerfile.app
           target: all-in-one
-          tags: parcelis/all:test
+          tags: parcelis/parcelis:test
           load: true
       - name: Smoke test all-in-one image
         env:
           DATABASE_URL: postgresql://parcelis:parcelis@localhost:5432/parcelis?schema=public
+          REDIS_PASSWORD: parcelis-test-redis-pw
         run: |
+          # Redis backs the API job queues and the worker; the API refuses to
+          # boot without REDIS_HOST/REDIS_PASSWORD.
+          docker run -d --name ci-redis --network host redis:8-alpine \
+            sh -c 'exec redis-server --requirepass "$REDIS_PASSWORD"'
+
           # The migration job must run from the image as an explicit deploy step.
           docker run --rm --network host \
             -e DATABASE_URL="$DATABASE_URL" \
             -w /repo \
-            parcelis/all:test \
+            parcelis/parcelis:test \
             pnpm --filter @parcelis/db exec prisma migrate deploy --schema prisma/schema.prisma
 
           # Start the single application image; nginx fronts web, API, and docs.
@@ -93,11 +99,28 @@ jobs:
             -e SMTP_HOST=localhost \
             -e SMTP_PORT=1025 \
             -e SMTP_SECURE=false \
-            parcelis/all:test
+            -e REDIS_HOST=localhost \
+            -e REDIS_PORT=6379 \
+            -e REDIS_PASSWORD="$REDIS_PASSWORD" \
+            parcelis/parcelis:test
+
+          # Start the background worker from the same image.
+          docker run -d --name parcelis-worker-test --network host \
+            -e DATABASE_URL="$DATABASE_URL" \
+            -e EMAIL_FROM='Parcelis <no-reply@example.com>' \
+            -e SMTP_HOST=localhost \
+            -e SMTP_PORT=1025 \
+            -e SMTP_SECURE=false \
+            -e REDIS_HOST=localhost \
+            -e REDIS_PORT=6379 \
+            -e REDIS_PASSWORD="$REDIS_PASSWORD" \
+            parcelis/parcelis:test \
+            pnpm --filter @parcelis/worker start
 
           cleanup() {
             docker logs parcelis-all-test || true
-            docker rm -f parcelis-all-test || true
+            docker logs parcelis-worker-test || true
+            docker rm -f parcelis-all-test parcelis-worker-test ci-redis || true
           }
           trap cleanup EXIT
 
@@ -115,20 +138,31 @@ jobs:
           done
           [ "$(docker inspect --format '{{.State.Health.Status}}' parcelis-all-test)" = "healthy" ]
 
+          # The worker must connect to Redis from the packaged dist output.
+          for _ in $(seq 1 24); do
+            if docker logs parcelis-worker-test 2>&1 | grep -q "Worker connected to Redis"; then
+              break
+            fi
+            sleep 5
+          done
+          docker logs parcelis-worker-test 2>&1 | grep -q "Worker connected to Redis"
+
           # Web app (follows / -> /login redirect), REST API, tRPC, docs
           # index, and a nested docs route.
           curl -fsSL http://localhost:3000/ -o /dev/null
           curl -fsS http://localhost:3000/api/v1/health
           echo
-          # Every /trpc procedure requires a session, so an unauthenticated
-          # call must answer 401 with the API's tRPC envelope (not the web
-          # 404 page): that proves nginx routes /trpc/* to the API.
+          # In app.router.ts, `publicProcedure` is aliased to
+          # `organizationProcedure`, so every /trpc procedure (including
+          # health) requires a session. An unauthenticated call must answer
+          # 401 with the API's tRPC envelope (not the web 404 page): that
+          # proves nginx routes /trpc/* to the API.
           trpc_status="$(curl -s -o /tmp/trpc.json -w '%{http_code}' 'http://localhost:3000/trpc/health?batch=1&input=%7B%220%22%3Anull%7D')"
           [ "$trpc_status" = "401" ]
           grep -q '"code":"UNAUTHORIZED"' /tmp/trpc.json
           grep -q '"path":"health"' /tmp/trpc.json
           curl -fsS http://localhost:3000/docs/ -o /dev/null
-          curl -fsS http://localhost:3000/docs/getting-started/deploy-with-docker/ -o /dev/null
+          curl -fsS http://localhost:3000/docs/getting-started/deploy-with-docker-compose-single-image/ -o /dev/null
 
           trap - EXIT
-          docker rm -f parcelis-all-test
+          docker rm -f parcelis-all-test parcelis-worker-test ci-redis
