@@ -35,7 +35,7 @@ services:
       - parcelis
 
   minio-service:
-    image: minio/minio:latest
+    image: parcelis/minio:final
     container_name: parcelis-minio
     command: server /data --console-address ":9001"
     environment:
@@ -106,6 +106,7 @@ services:
       AUTH_COOKIE_DOMAIN: ${AUTH_COOKIE_DOMAIN:-}
       AUTH_COOKIE_SECURE: ${AUTH_COOKIE_SECURE:-false}
       AUTH_DISABLED: ${AUTH_DISABLED:-false}
+      FEATURE_FLAG_APPLICATIONS_ENABLED: ${FEATURE_FLAG_APPLICATIONS_ENABLED:-false}
       SESSION_IDLE_TIMEOUT_ENABLED: ${SESSION_IDLE_TIMEOUT_ENABLED:-true}
       EMAIL_FROM: ${EMAIL_FROM}
       SMTP_HOST: ${SMTP_HOST}
