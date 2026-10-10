@@ -14,7 +14,7 @@ Use `parcelis/parcelis` when you want:
 
 - One application image and one exposed application port.
 - A simpler self-hosted setup that is closer to a single deployable unit.
-- The same public URL layout as the modular stack: web app at `/`, tRPC at `/trpc/*`, public API at `/api/*`, documentation at `/docs/`.
+- The same public URL layout as the modular stack: web app at `/`, tRPC at `/trpc/*`, public API at `/api/*`, job dashboard at `/admin/jobs/`, documentation at `/docs/`.
 
 Use the modular [`docker-compose.yml`](https://raw.githubusercontent.com/parcelis/parcelis/main/docker-compose.yml) stack when you want the documentation site and proxy as separately deployed or scaled services, or when you want to keep the proxy on a separate container. Note that the web app and API run together inside the `parcelis/app` image in the modular stack, so neither topology scales the web app independently from the API.
 
@@ -113,7 +113,7 @@ The single application image Compose stack will:
 - Start `app-service` once both jobs have completed successfully and the database and object storage are ready.
 - Start `worker-service` from the same `parcelis/parcelis` image to process background jobs once migrations are applied and Redis is healthy.
 
-`app-service` exposes the web app at `/`, tRPC at `/trpc/*`, the public API at `/api/*`, and the documentation site at `/docs/`, on the configured `APP_PORT` (default `3000`).
+`app-service` exposes the web app at `/`, tRPC at `/trpc/*`, the public API at `/api/*`, the job dashboard at `/admin/jobs/`, and the documentation site at `/docs/`, on the configured `APP_PORT` (default `3000`).
 
 ## Upgrading and running migrations
 

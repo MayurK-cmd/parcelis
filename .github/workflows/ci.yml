@@ -79,8 +79,11 @@ jobs:
           REDIS_PASSWORD: parcelis-test-redis-pw
         run: |
           # Redis backs the API job queues and the worker; the API refuses to
-          # boot without REDIS_HOST/REDIS_PASSWORD.
-          docker run -d --name ci-redis --network host redis:8-alpine \
+          # boot without REDIS_HOST/REDIS_PASSWORD. The password must be
+          # passed into the Redis container so its --requirepass matches.
+          docker run -d --name ci-redis --network host \
+            -e REDIS_PASSWORD="$REDIS_PASSWORD" \
+            redis:8-alpine \
             sh -c 'exec redis-server --requirepass "$REDIS_PASSWORD"'
 
           # The migration job must run from the image as an explicit deploy step.
@@ -163,6 +166,10 @@ jobs:
           grep -q '"path":"health"' /tmp/trpc.json
           curl -fsS http://localhost:3000/docs/ -o /dev/null
           curl -fsS http://localhost:3000/docs/getting-started/deploy-with-docker-compose-single-image/ -o /dev/null
+
+          # The job dashboard must route to the API (401 from its auth
+          # middleware for anonymous requests), not fall through to Next.js.
+          [ "$(curl -s -o /dev/null -w '%{http_code}' http://localhost:3000/admin/jobs/)" = "401" ]
 
           trap - EXIT
           docker rm -f parcelis-all-test parcelis-worker-test ci-redis
