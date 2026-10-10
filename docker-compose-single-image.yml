@@ -52,7 +52,7 @@ services:
       - parcelis
 
   minio-service:
-    image: minio/minio:latest
+    image: parcelis/minio:final
     container_name: parcelis-all-in-one-minio
     command: server /data --console-address ":9001"
     environment:
