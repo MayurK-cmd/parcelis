@@ -68,7 +68,7 @@ services:
       - parcelis
 
   minio-init-service:
-    image: minio/mc:latest
+    image: parcelis/minio-init:final
     container_name: parcelis-all-in-one-minio-init
     depends_on:
       - minio-service
