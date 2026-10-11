@@ -53,6 +53,11 @@ When adding or removing a primary technology or service, update this file in the
 | [Zod](https://zod.dev/)                                                        | Shared validation for application data.                                                   |
 
 Development and deployment Compose use the `parcelis/minio:final` mirror.
+The single-image stack additionally uses the `parcelis/minio-init:final` mirror
+for bucket initialization. Both are externally published MinIO mirrors (server
+and `mc` client at RELEASE.2025-01-17T23-25-50Z respectively), not artifacts of
+this repo's release workflow; they replace the removed Docker Hub `minio/*`
+images.
 Development and deployment PostgreSQL use `postgres:16-alpine` to match existing data volumes. A major-version upgrade requires an explicit database migration.
 
 ## Interface
