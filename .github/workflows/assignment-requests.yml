@@ -14,6 +14,7 @@ jobs:
     steps:
       - uses: scoobs-mystery-bytes/assign-issue-action@d4e85d5e61e01644ad8500dc01677788a2be9845
         with:
+          max_assignments: "10"
           required_label: "ready for development"
           enable_auto_suggestion: "true"
           discord_buttons_enabled: "true"
