@@ -5,9 +5,9 @@
 # - `app`: modular image with the web app, API, worker, and internal nginx.
 #   Deploy it together with the docs and proxy images, plus a worker container
 #   and Redis (Modular: app + worker + docs + proxy).
-# - `all-in-one`: single application image with the web app, API, worker,
+# - `single-image`: single application image with the web app, API, worker,
 #   documentation site, and public nginx routing. Deploy it instead of the
-#   modular images (Simplified: all-in-one).
+#   modular images (Simplified: single-image).
 #
 # PostgreSQL and S3-compatible object storage remain external services in both
 # topologies, and database migrations stay an explicit deployment step.
@@ -138,7 +138,7 @@ CMD ["supervisord", "-c", "/etc/supervisord.conf"]
 # ---------------------------------------------------------------------------
 # Single application image (web app + API + docs + public nginx)
 # ---------------------------------------------------------------------------
-FROM runtime-base AS all-in-one
+FROM runtime-base AS single-image
 # Docs build output (static files served directly by nginx)
 COPY --from=docs-build /repo/apps/docs/build /usr/share/parcelis-docs
 COPY infra/docker/all-in-one/nginx.conf /etc/nginx/http.d/default.conf

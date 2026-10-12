@@ -25,7 +25,7 @@ jobs:
             description: Parcelis documentation site for the Parcelis Docker Compose stack.
           - image: parcelis
             file: Dockerfile.app
-            target: all-in-one
+            target: single-image
             title: Parcelis Single Image
             description: Parcelis web app, API, documentation site, and nginx edge routing in a single image.
           - image: proxy

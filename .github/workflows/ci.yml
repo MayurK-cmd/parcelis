@@ -65,15 +65,15 @@ jobs:
           target: app
           tags: parcelis/app:test
           load: true
-      - name: Build all-in-one image
+      - name: Build parcelis single-image
         uses: docker/build-push-action@v7
         with:
           context: .
           file: Dockerfile.app
-          target: all-in-one
+          target: single-image
           tags: parcelis/parcelis:test
           load: true
-      - name: Smoke test all-in-one image
+      - name: Smoke test parcelis single image
         env:
           DATABASE_URL: postgresql://parcelis:parcelis@localhost:5432/parcelis?schema=public
           REDIS_PASSWORD: parcelis-test-redis-pw
