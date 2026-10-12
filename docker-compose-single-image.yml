@@ -15,12 +15,12 @@
 #   # edit .env.production with your production values
 #   docker compose --env-file .env.production -f docker-compose-single-image.yml up -d --remove-orphans
 
-name: parcelis-all-in-one
+name: parcelis-single-image
 
 services:
   postgres-service:
     image: postgres:16-alpine
-    container_name: parcelis-all-in-one-postgres
+    container_name: parcelis-single-image-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -37,7 +37,7 @@ services:
 
   redis-service:
     image: redis:8-alpine
-    container_name: parcelis-all-in-one-redis
+    container_name: parcelis-single-image-redis
     command: ["/bin/sh", "-c", 'exec redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"']
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
@@ -53,7 +53,7 @@ services:
 
   minio-service:
     image: parcelis/minio:final
-    container_name: parcelis-all-in-one-minio
+    container_name: parcelis-single-image-minio
     command: server /data --console-address ":9001"
     environment:
       MINIO_API_CORS_ALLOW_ORIGIN: "${MINIO_API_CORS_ALLOW_ORIGIN:-${WEB_ORIGIN}}"
@@ -69,7 +69,7 @@ services:
 
   minio-init-service:
     image: parcelis/minio-init:final
-    container_name: parcelis-all-in-one-minio-init
+    container_name: parcelis-single-image-minio-init
     depends_on:
       - minio-service
     environment:
@@ -93,7 +93,7 @@ services:
 
   migrate-service:
     image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
-    container_name: parcelis-all-in-one-migrate
+    container_name: parcelis-single-image-migrate
     command: pnpm --filter @parcelis/db exec prisma migrate deploy --schema prisma/schema.prisma
     working_dir: /repo
     environment:
@@ -106,7 +106,7 @@ services:
 
   app-service:
     image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
-    container_name: parcelis-all-in-one-app
+    container_name: parcelis-single-image-app
     ports:
       - "${APP_PORT:-3000}:3000"
     environment:
@@ -147,7 +147,7 @@ services:
 
   worker-service:
     image: parcelis/parcelis:${PARCELIS_VERSION:-v0.4.1}
-    container_name: parcelis-all-in-one-worker
+    container_name: parcelis-single-image-worker
     command: pnpm --filter @parcelis/worker start
     environment:
       EMAIL_FROM: ${EMAIL_FROM}
@@ -176,7 +176,7 @@ volumes:
 
 networks:
   parcelis:
-    name: parcelis-all-in-one
+    name: parcelis-single-image
     ipam:
       config:
         - subnet: 10.90.0.0/24

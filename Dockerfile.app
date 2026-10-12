@@ -141,7 +141,7 @@ CMD ["supervisord", "-c", "/etc/supervisord.conf"]
 FROM runtime-base AS single-image
 # Docs build output (static files served directly by nginx)
 COPY --from=docs-build /repo/apps/docs/build /usr/share/parcelis-docs
-COPY infra/docker/all-in-one/nginx.conf /etc/nginx/http.d/default.conf
+COPY infra/docker/single-image/nginx.conf /etc/nginx/http.d/default.conf
 # Reuse the modular supervisor configuration: api + web + nginx on the same
 # loopback ports the nginx config expects.
 COPY infra/docker/app/supervisord.conf /etc/supervisord.conf
